@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Databases
+*.db
+*.sqlite3
+
+# Logs and Data
+*.csv
+*.log
+
+# Application Specific
+settings.json
+static/events/*
+!static/events/.gitkeep
+
+# Large AI Model Weights (Should be downloaded at runtime)
+*.pt
+
+# OS generated files
+.DS_Store
+Thumbs.db

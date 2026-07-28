@@ -96,6 +96,19 @@ def init_db():
             """
         )
         
+        # Box Logs Table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS box_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                loaded_count INTEGER NOT NULL,
+                unloaded_count INTEGER NOT NULL,
+                photo_path TEXT
+            )
+            """
+        )
+        
         conn.commit()
         conn.close()
 
@@ -200,6 +213,16 @@ def log_worker(worker_name, work_time_s, rest_time_s, photo_path):
         conn.commit()
         conn.close()
 
+def log_box(loaded_count, unloaded_count, photo_path):
+    with _lock:
+        conn = _connect()
+        conn.execute(
+            "INSERT INTO box_logs (ts, loaded_count, unloaded_count, photo_path) VALUES (?, ?, ?, ?)",
+            (time.time(), loaded_count, unloaded_count, photo_path)
+        )
+        conn.commit()
+        conn.close()
+
 # Function to fetch data by model
 def get_model_data(mode, limit=50):
     with _lock:
@@ -217,6 +240,8 @@ def get_model_data(mode, limit=50):
                 rows = conn.execute("SELECT id, ts, person_count, photo_path FROM queue_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             elif mode == "worker":
                 rows = conn.execute("SELECT id, ts, worker_name, work_time_s, rest_time_s, photo_path FROM worker_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            elif mode == "box":
+                rows = conn.execute("SELECT id, ts, loaded_count, unloaded_count, photo_path FROM box_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         except sqlite3.OperationalError:
             # Table might not be migrated, just select *
             rows = conn.execute(f"SELECT * FROM {mode}_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

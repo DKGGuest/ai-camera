@@ -5,17 +5,19 @@ import threading
 import time
 from collections import defaultdict
 
-import cv2
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
+import cv2
 import numpy as np
+
+from src.monitors.box_bcounter import BoxCounter
+import src.core.models as models
 
 import config
 import database
 import models_loader
 import math
-from src.core.models import load_worker_face_detector
 
-MODES = ("access", "vehicle", "adaptive", "people", "worker", "queue")
+MODES = ("access", "vehicle", "adaptive", "people", "worker", "queue", "box")
 VEHICLE_CLASSES = [2, 3, 5, 7]   # car, motorcycle, bus, truck (COCO ids)
 PERSON_CLASS = 0
 
@@ -83,6 +85,7 @@ class CameraWorker:
     def __init__(self):
         settings = load_settings()
         self.camera_url = settings.get("camera_url", config.DEFAULT_CAMERA_URL)
+        self._requested_camera_url = None
         self.mode = settings.get("mode", "access")
         self.queue_roi = settings.get("queue_roi", None)
 
@@ -113,6 +116,7 @@ class CameraWorker:
         # Adaptive-stream state
         self._active_mode = False
         self._last_human_seen = 0
+        self._adaptive_last_change = time.time()
         self._COOLDOWN = 5.0
 
         # People-counter state
@@ -120,6 +124,7 @@ class CameraWorker:
         self._people_next_id = 0
         self._people_entry_count = 0
         self._people_exit_count = 0
+        self._last_people_photo = 0.0
 
         # Worker-tracker state
         self._gender_net = None
@@ -130,11 +135,19 @@ class CameraWorker:
         self._worker_last_laptop_boxes = []
         self._worker_last_phone_boxes = []
         self._worker_last_tick = None
+        self._last_worker_photo = 0.0
         self._worker_pair_close_since = {}   # frozenset({id1, id2}) -> timestamp first seen close & not working
         self._worker_csv_path = os.path.join(config.BASE_DIR, "worker_logs.csv")
 
         # Queue-monitor state
         self._queue_last_alarm = 0.0
+        self._last_queue_photo = 0.0
+
+        # Queue setup
+        self._queue_roi = []
+        
+        # Box Counter setup
+        self._box_line = []
 
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -171,14 +184,18 @@ class CameraWorker:
         database.log_event("system", "mode_change", f"Switched to '{mode}' model", "info")
 
     def set_camera_url(self, url):
-        self.camera_url = url
+        self._requested_camera_url = url
         s = load_settings()
         s["camera_url"] = url
         save_settings(s)
-        with self._frame_lock:
-            if self._cap is not None:
-                self._cap.release()
-            self._cap = None  # forces reconnect in the loop
+
+    def set_queue_roi(self, points):
+        with self._status_lock:
+            self._queue_roi = points
+            
+    def set_box_line(self, points):
+        with self._status_lock:
+            self._box_line = points
 
     def reload_known_faces(self):
         self._ensure_models_loaded()
@@ -198,12 +215,14 @@ class CameraWorker:
 
     def mjpeg_generator(self):
         boundary = b"--frame"
+        last_jpeg = None
         while True:
             with self._frame_lock:
                 jpeg = self._latest_jpeg
-            if jpeg is not None:
+            if jpeg is not None and jpeg != last_jpeg:
                 yield (boundary + b"\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n")
-            time.sleep(0.04)  # ~25 fps cap on the output stream
+                last_jpeg = jpeg
+            time.sleep(0.02)  # Check quickly, but only send new frames
 
     # ------------------------------------------------------------------ #
     # Internals
@@ -213,14 +232,15 @@ class CameraWorker:
     def _ensure_models_loaded(self):
         if self._yolo is None:
             self._yolo = models_loader.load_yolo_model()
-        if self._face_detector is None:
-            self._face_detector, self._face_recognizer = models_loader.load_face_models()
-            self._known_embeddings = models_loader.load_known_faces(
-                config.KNOWN_FACES_DIR, self._face_detector, self._face_recognizer
-            )
+        self._box_counter = BoxCounter()
+        self._face_detector, self._face_recognizer = models_loader.load_face_models()
+        self._known_embeddings = models_loader.load_known_faces(
+            config.KNOWN_FACES_DIR, self._face_detector, self._face_recognizer
+        )
 
     def _open_capture(self):
         src = int(self.camera_url) if str(self.camera_url).isdigit() else self.camera_url
+        # Always use FFMPEG to enforce nobuffer options and avoid MSMF lag on Windows
         cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return cap
@@ -234,6 +254,16 @@ class CameraWorker:
         processing loop below just always grabs whatever is newest, however far behind
         it currently is."""
         while not self._stop:
+            # Safely handle camera URL switch in the capture thread
+            if self._requested_camera_url is not None:
+                self.camera_url = self._requested_camera_url
+                self._requested_camera_url = None
+                if self._cap is not None:
+                    self._cap.release()
+                    self._cap = None
+                with self._raw_frame_lock:
+                    self._raw_frame = None
+
             if self._cap is None:
                 self._cap = self._open_capture()
                 if not self._cap.isOpened():
@@ -268,7 +298,13 @@ class CameraWorker:
                 frame = None if self._raw_frame is None else self._raw_frame.copy()
 
             if frame is None:
-                time.sleep(0.02)
+                placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(placeholder, "Connecting to camera...", (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                ok, buf = cv2.imencode(".jpg", placeholder, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                if ok:
+                    with self._frame_lock:
+                        self._latest_jpeg = buf.tobytes()
+                time.sleep(0.1)
                 continue
 
             # Downscale heavy 4K frames before AI processing to keep pace with 25fps input
@@ -288,6 +324,8 @@ class CameraWorker:
                     out = self._process_worker(frame)
                 elif self.mode == "queue":
                     out = self._process_queue(frame)
+                elif self.mode == "box":
+                    out = self._process_box(frame)
                 else:
                     out = self._process_adaptive(frame)
             except Exception as e:
@@ -300,6 +338,9 @@ class CameraWorker:
             if ok:
                 with self._frame_lock:
                     self._latest_jpeg = buf.tobytes()
+
+            # Yield CPU briefly so the capture thread can eagerly empty the network buffer
+            time.sleep(0.01)
 
     # ------------------------------------------------------------------ #
     # Model 1: Access Control (entry/exit, granted/denied)
@@ -430,11 +471,8 @@ class CameraWorker:
 
         if was_active != self._active_mode:
             state = "high" if self._active_mode else "low"
-            duration = now - (self._last_human_seen if not self._active_mode else now)
-            if not self._active_mode:
-                duration = self._COOLDOWN
-            else:
-                duration = 0 # Starts now
+            duration = now - self._adaptive_last_change
+            self._adaptive_last_change = now
             
             database.log_event("adaptive", "bitrate_change",
                                 "Switched to HIGH bitrate" if self._active_mode else "Switched to LOW bitrate",
@@ -520,6 +558,13 @@ class CameraWorker:
                 self._people_tracks[tid]["lost"] += 1
                 if self._people_tracks[tid]["lost"] > 15:
                     del self._people_tracks[tid]
+
+        now = time.time()
+        if now - self._last_people_photo > 5.0:
+            self._last_people_photo = now
+            photo_path = f"static/events/{int(now)}_people_periodic.jpg"
+            cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
+            database.log_people("periodic", self._people_entry_count, self._people_exit_count, photo_path)
 
         cv2.line(frame, (0, counting_line_y), (width, counting_line_y), (255, 0, 0), 2)
         cv2.rectangle(frame, (10, 10), (250, 90), (0, 0, 0), -1)
@@ -867,7 +912,15 @@ class CameraWorker:
             px2, py2 = min(width, x2 + 12), min(height, y2 + 12)
             cv2.rectangle(frame, (px1, py1), (px2, py2), color, 2)
 
-            # --- Dual timer labels ---
+            # ---- Write output / display ----
+            
+            if now - self._last_worker_photo > 5.0:
+                self._last_worker_photo = now
+                photo_path = f"static/events/{int(now)}_worker_periodic.jpg"
+                cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
+                # Log an overall summary line if we want, or just a dummy entry
+                database.log_worker("Periodic Snapshot", 0.0, 0.0, photo_path)
+
             w_time = _fmt_time(s.get("working_s", 0.0))
             nw_time = _fmt_time(s.get("not_working_s", 0.0))
 
@@ -1003,13 +1056,38 @@ class CameraWorker:
         if time.time() - self._queue_last_alarm > 2.0:
             if people_in_line > 7:
                 os.system("afplay /System/Library/Sounds/Ping.aiff &")
-                database.log_event("queue", "alarm", f"{people_in_line} people in line", "warning")
-            photo_path = f"static/events/{int(time.time())}_queue_{people_in_line}.jpg"
-            cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
-            database.log_queue(people_in_line, photo_path)
-            self._queue_last_alarm = time.time()
+            if time.time() - self._last_queue_photo > 5.0:
+                self._last_queue_photo = time.time()
+                photo_path = f"static/events/{int(time.time())}_queue_{people_in_line}.jpg"
+                cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
+                database.log_queue(people_in_line, photo_path)
+            
+        if people_in_line >= 5 and time.time() - self._queue_last_alarm > 10.0:
+            database.log_event("queue", "long_queue", f"{people_in_line} people in line!", "alert")
 
         return frame
+
+    def _process_box(self, frame):
+        # We'll use YOLOv8 class 28 (suitcase) as a proxy for box/sack for this demonstration
+        results = self._yolo(frame, classes=[28], conf=0.2, verbose=False)
+        r = results[0]
+        boxes = []
+        for box in r.boxes:
+            b = box.xyxy[0].cpu().numpy()
+            boxes.append({'bbox': b})
+            
+        with self._status_lock:
+            line_pts = list(self._box_line)
+            
+        out_frame, event_occurred, event_type = self._box_counter.process_frame(frame.copy(), boxes, line_pts)
+        
+        if event_occurred:
+            database.log_event("box", event_type, f"A box was {event_type}", "info")
+            photo_path = f"static/events/{int(time.time())}_box_{event_type}.jpg"
+            cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), out_frame)
+            database.log_box(self._box_counter.loaded_count, self._box_counter.unloaded_count, photo_path)
+            
+        return out_frame
 
 
 

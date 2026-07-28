@@ -173,12 +173,13 @@ function drawRoiSvg() {
 window.addEventListener("resize", drawRoiSvg);
 
 function updateControlsVisibility(mode) {
-  if (queueControls) {
-    const isQueue = (mode === "queue");
-    queueControls.style.display = isQueue ? "block" : "none";
-    if (roiSvg) {
-      roiSvg.style.display = isQueue ? "block" : "none";
-    }
+  if (queueControls) queueControls.style.display = (mode === "queue") ? "block" : "none";
+  if (boxLineControls) boxLineControls.style.display = (mode === "box") ? "block" : "none";
+  
+  if (roiSvg) {
+      roiSvg.style.display = (mode === "queue" || mode === "box") ? "block" : "none";
+      if (mode === "queue") drawRoiSvg();
+      else if (mode === "box") drawBoxLineSvg();
   }
 }
 
@@ -255,6 +256,99 @@ clearRoiBtn.addEventListener("click", async () => {
   if (!data.ok) {
     alert("Error resetting Queue Zone: " + data.error);
   }
+});
+
+// --- Box Counter SVG Logic ---
+const boxLineControls = document.getElementById("box-line-controls");
+const clearLineBtn = document.getElementById("clear-line-btn");
+let boxPoints = [];
+
+function drawBoxLineSvg() {
+  if (!roiSvg) return;
+  roiSvg.innerHTML = "";
+  
+  if (boxPoints.length === 0) return;
+  
+  const rect = roiSvg.getBoundingClientRect();
+  
+  boxPoints.forEach((pt, index) => {
+    const cx = pt[0] * rect.width;
+    const cy = pt[1] * rect.height;
+    
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", cx);
+    circle.setAttribute("cy", cy);
+    circle.setAttribute("r", "6");
+    circle.setAttribute("fill", "#3498db");
+    circle.setAttribute("stroke", "#fff");
+    circle.setAttribute("stroke-width", "2");
+    roiSvg.appendChild(circle);
+  });
+  
+  if (boxPoints.length === 2) {
+    const p1 = boxPoints[0];
+    const p2 = boxPoints[1];
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", p1[0] * rect.width);
+    line.setAttribute("y1", p1[1] * rect.height);
+    line.setAttribute("x2", p2[0] * rect.width);
+    line.setAttribute("y2", p2[1] * rect.height);
+    line.setAttribute("stroke", "#3498db");
+    line.setAttribute("stroke-width", "3");
+    roiSvg.appendChild(line);
+  }
+}
+
+if (roiSvg) {
+  roiSvg.addEventListener("click", async (e) => {
+    const activeBtn = document.querySelector(".mode-btn.active");
+    if (!activeBtn || activeBtn.dataset.mode !== "box") return;
+
+    if (boxPoints.length >= 2) return; // Already have a line
+
+    const rect = roiSvg.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    
+    const relX = clickX / rect.width;
+    const relY = clickY / rect.height;
+    
+    boxPoints.push([relX, relY]);
+    drawBoxLineSvg();
+    
+    if (boxPoints.length === 2) {
+      const res = await fetch("/api/set_box_line", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ points: boxPoints }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert("Error setting line: " + data.error);
+        boxPoints = [];
+        drawBoxLineSvg();
+      }
+    }
+  });
+}
+
+if (clearLineBtn) {
+  clearLineBtn.addEventListener("click", async () => {
+    boxPoints = [];
+    drawBoxLineSvg();
+    
+    await fetch("/api/set_box_line", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ points: [] }),
+    });
+  });
+}
+
+// Ensure resizing redraws correct SVG
+window.addEventListener("resize", () => {
+    if (currentMode === "queue") drawRoiSvg();
+    if (currentMode === "box") drawBoxLineSvg();
 });
 
 // --- Clear Logs ---
@@ -335,9 +429,11 @@ async function pollModelData() {
                 const dateStr = dt.toISOString().split('T')[0];
                 const timeStr = dt.toTimeString().split(' ')[0];
                 const imgHtml = r.photo_path ? `<img src="/${r.photo_path}" style="width: 80px; height: 45px; object-fit: cover; border-radius: 4px; border: 1px solid #444;">` : 'N/A';
+                // Show Alert if denied, else name
+                const displayObj = r.status === 'denied' ? 'Alert' : r.name;
                 return `<tr>
                     <td>${r.id}</td>
-                    <td>${r.name}</td>
+                    <td>${displayObj}</td>
                     <td class="${statusClass(r.status === 'granted' ? 'success' : 'error')}">${r.status}</td>
                     <td>${imgHtml}</td>
                     <td>${dateStr}</td>
@@ -408,6 +504,23 @@ async function pollModelData() {
                     <td>${r.worker_name}</td>
                     <td>${r.work_time_s.toFixed(1)}</td>
                     <td>${r.rest_time_s.toFixed(1)}</td>
+                    <td>${imgHtml}</td>
+                    <td>${dateStr}</td>
+                    <td>${timeStr}</td>
+                </tr>`;
+            }).join("");
+        } else if (currentMode === "box") {
+            title = "Truck Loader Box Counter";
+            headers = "<th>Serial No.</th><th>Total Loaded</th><th>Total Unloaded</th><th>Photo</th><th>Date</th><th>Time</th>";
+            rows = data.map(r => {
+                const dt = new Date(r.ts * 1000);
+                const dateStr = dt.toISOString().split('T')[0];
+                const timeStr = dt.toTimeString().split(' ')[0];
+                const imgHtml = r.photo_path ? `<img src="/${r.photo_path}" style="width: 80px; height: 45px; object-fit: cover; border-radius: 4px; border: 1px solid #444;">` : 'N/A';
+                return `<tr>
+                    <td>${r.id}</td>
+                    <td><strong style="color: #2ecc71;">${r.loaded_count}</strong></td>
+                    <td><strong style="color: #e74c3c;">${r.unloaded_count}</strong></td>
                     <td>${imgHtml}</td>
                     <td>${dateStr}</td>
                     <td>${timeStr}</td>

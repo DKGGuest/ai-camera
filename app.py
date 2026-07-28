@@ -58,7 +58,7 @@ def index():
 @login_required
 def dashboard():
     status = worker.get_status()
-    return render_template("dashboard.html", status=status, modes=["access","vehicle","adaptive","people","worker","queue"])
+    return render_template("dashboard.html", status=status, modes=["access","vehicle","adaptive","people","worker","queue", "box"])
 
 
 @app.route("/video_feed")

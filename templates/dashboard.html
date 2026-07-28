@@ -29,11 +29,18 @@
         <button id="clear-roi-btn" style="padding: 6px 12px; background: #c0392b; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold;">Reset Selection</button>
       </div>
 
+      <div id="box-line-controls" style="display: none; margin-top: 10px; background: rgba(255, 255, 255, 0.05); padding: 10px; border-radius: 6px; border: 1px solid #444;">
+        <p style="margin: 0 0 8px 0; font-size: 0.9em; color: #ccc; line-height: 1.4;">
+          <strong>Truck Counter Line Setup:</strong> Click 2 points on the video feed to draw the crossing line for boxes/sacks.
+        </p>
+        <button id="clear-line-btn" style="padding: 6px 12px; background: #c0392b; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold;">Reset Line</button>
+      </div>
+
       <div class="mode-switcher">
         <span class="label">Active Model:</span>
         {% for m in modes %}
           <button class="mode-btn" data-mode="{{ m }}">
-            {{ {"access": "Access Control (Entry/Exit)", "vehicle": "Vehicle Detection", "adaptive": "Adaptive Bitrate", "people": "People Counter", "worker": "Worker Tracker", "queue": "Queue Monitor"}[m] }}
+            {{ {"access": "Access Control (Entry/Exit)", "vehicle": "Vehicle Detection", "adaptive": "Adaptive Bitrate", "people": "People Counter", "worker": "Worker Tracker", "queue": "Queue Monitor", "box": "Box/Sack Counter"}[m] }}
           </button>
         {% endfor %}
       </div>
@@ -42,8 +49,7 @@
         <span class="label">Select Camera:</span>
         <select id="camera-select" style="flex: 1; padding: 8px; border-radius: 4px; background: #333; color: white; border: 1px solid #555;">
             <option value="http://192.168.1.12/stream">Default ESP32 Cam (http://192.168.1.12/stream)</option>
-            <option value="rtsp://admin:DKGroup%402009@192.168.1.34:554/Streaming/Channels/101">Hikvision Live Cam (rtsp://admin:DKGroup%402009@192.168.1.34:554/Streaming/Channels/101)</option>
-            <option value="rtsp://admin:DKGroup%402009@192.168.1.34:554/cam/realmonitor?channel=1&subtype=0">CP Plus Live Cam (rtsp://admin:DKGroup%402009@192.168.1.34:554/cam/realmonitor?channel=1&subtype=0)</option>
+            <option value="rtsp://admin:DKGroup%402009@192.168.1.34:554/video/live?channel=1&subtype=0">CP Plus Camera (rtsp://admin:DKGroup%402009@192.168.1.34:554/video/live?channel=1&subtype=0)</option>
             <option value="custom">Add Custom Camera IP/URL...</option>
         </select>
         <button id="delete-custom-camera" style="display: none; background: #e74c3c; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">Delete</button>
