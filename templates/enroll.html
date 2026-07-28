@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Smart Camera - Enroll Faces</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Enroll a Known Face</h1>
+    <nav>
+      <a href="{{ url_for('dashboard') }}">&larr; Back to Dashboard</a>
+    </nav>
+  </header>
+
+  <main class="enroll-grid">
+    <section class="enroll-panel">
+      <h2>Add Person</h2>
+      <label>Name</label>
+      <input type="text" id="enroll-name" placeholder="e.g. John">
+
+      <div class="enroll-box">
+        <h3>Option A: Upload a photo</h3>
+        <input type="file" id="photo-file" accept="image/*">
+        <button id="upload-btn">Upload &amp; Save</button>
+      </div>
+
+      <div class="enroll-box">
+        <h3>Option B: Capture from live camera</h3>
+        <img id="live-preview" src="{{ url_for('video_feed') }}" alt="live preview">
+        <button id="capture-btn">Capture Now</button>
+      </div>
+
+      <div id="enroll-status" class="status-msg"></div>
+    </section>
+
+    <section class="known-list">
+      <h2>Enrolled Photos ({{ faces|length }})</h2>
+      <ul>
+        {% for f in faces %}
+          <li>{{ f }}</li>
+        {% else %}
+          <li class="empty">No one enrolled yet. Everyone will be shown as ACCESS DENIED.</li>
+        {% endfor %}
+      </ul>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='enroll.js') }}"></script>
+</body>
+</html>

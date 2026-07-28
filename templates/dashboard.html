@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Smart Camera - Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Smart Camera System</h1>
+    <nav>
+      <a href="{{ url_for('enroll_page') }}">Enroll Faces</a>
+      <a href="{{ url_for('logout') }}">Logout ({{ session['username'] }})</a>
+    </nav>
+  </header>
+
+  <main class="dashboard-grid">
+    <section class="video-panel">
+      <div class="video-wrap" id="video-container" style="position: relative; display: inline-block; cursor: pointer;">
+        <img id="video-feed" src="{{ url_for('video_feed') }}" alt="Camera feed" style="display: block; width: 100%; transition: all 0.3s ease;">
+        <svg id="roi-svg" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: auto; cursor: crosshair; display: none;"></svg>
+        <span id="conn-badge" class="badge">connecting...</span>
+      </div>
+      
+      <div id="queue-roi-controls" style="display: none; margin-top: 10px; background: rgba(255, 255, 255, 0.05); padding: 10px; border-radius: 6px; border: 1px solid #444;">
+        <p style="margin: 0 0 8px 0; font-size: 0.9em; color: #ccc; line-height: 1.4;">
+          <strong>Queue Zone Setup:</strong> Click 4 points on the video feed in order (top-left, top-right, bottom-right, bottom-left) to draw a custom box.
+        </p>
+        <button id="clear-roi-btn" style="padding: 6px 12px; background: #c0392b; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold;">Reset Selection</button>
+      </div>
+
+      <div class="mode-switcher">
+        <span class="label">Active Model:</span>
+        {% for m in modes %}
+          <button class="mode-btn" data-mode="{{ m }}">
+            {{ {"access": "Access Control (Entry/Exit)", "vehicle": "Vehicle Detection", "adaptive": "Adaptive Bitrate", "people": "People Counter", "worker": "Worker Tracker", "queue": "Queue Monitor"}[m] }}
+          </button>
+        {% endfor %}
+      </div>
+
+      <div class="camera-url-box" style="margin-top: 15px; display: flex; gap: 10px; align-items: center;">
+        <span class="label">Select Camera:</span>
+        <select id="camera-select" style="flex: 1; padding: 8px; border-radius: 4px; background: #333; color: white; border: 1px solid #555;">
+            <option value="http://192.168.1.12/stream">Default ESP32 Cam (http://192.168.1.12/stream)</option>
+            <option value="rtsp://admin:DKGroup%402009@192.168.1.34:554/Streaming/Channels/101">Hikvision Live Cam (rtsp://admin:DKGroup%402009@192.168.1.34:554/Streaming/Channels/101)</option>
+            <option value="rtsp://admin:DKGroup%402009@192.168.1.34:554/cam/realmonitor?channel=1&subtype=0">CP Plus Live Cam (rtsp://admin:DKGroup%402009@192.168.1.34:554/cam/realmonitor?channel=1&subtype=0)</option>
+            <option value="custom">Add Custom Camera IP/URL...</option>
+        </select>
+        <button id="delete-custom-camera" style="display: none; background: #e74c3c; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer;">Delete</button>
+      </div>
+      
+      <!-- New Custom Camera Modal / Input (hidden by default) -->
+      <div id="custom-camera-box" style="display: none; margin-top: 10px; gap: 10px; align-items: center;">
+        <input type="text" id="custom-camera-input" placeholder="Enter IP or RTSP URL" style="flex: 1; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #222; color: #fff;">
+        <button id="save-custom-camera" style="padding: 8px 16px; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer;">Add</button>
+      </div>
+
+      <!-- Live Model Data Table -->
+      <div class="model-data-section" style="margin-top: 25px;">
+        <h3 id="model-data-title" style="margin-bottom: 10px; padding-bottom: 5px; color: #4f7dfb; font-size: 16px;">Access Control Log Table</h3>
+        <div style="overflow-x: auto; background: #181b21; border-radius: 10px; padding: 16px; border: 1px solid #262a33;">
+            <table id="model-data-table" style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+              <thead style="border-bottom: 1px solid #333;">
+                <tr id="model-data-head">
+                  <!-- Generated dynamically -->
+                </tr>
+              </thead>
+              <tbody id="model-data-body">
+                <!-- Generated dynamically -->
+              </tbody>
+            </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="events-panel" style="position: relative;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <h2 style="margin: 0;">Live Detection Log</h2>
+        <button id="clear-logs-btn" style="padding: 4px 10px; background: #e74c3c; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 0.8em;">Clear</button>
+      </div>
+      <table id="events-table">
+        <thead>
+          <tr><th>Time</th><th>Model</th><th>Event</th><th>Detail</th><th>Status</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+flask
+opencv-python>=4.10,<5
+opencv-python-headless>=4.10,<5
+ultralytics
+numpy>=2.0.0
+lap
