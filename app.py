@@ -168,11 +168,50 @@ def enroll_capture():
 @login_required
 def api_set_queue_roi():
     points = request.json.get("points")
-    if points is not None and len(points) != 4 and len(points) != 0:
-        return jsonify({"ok": False, "error": "Must select exactly 4 points"}), 400
+    if points is not None and len(points) != 0:
+        if not isinstance(points, list) or len(points) > 5:
+            return jsonify({"ok": False, "error": "Must have 1 to 5 queues"}), 400
+        for roi in points:
+            if not isinstance(roi, list) or len(roi) != 4:
+                return jsonify({"ok": False, "error": "Each queue must have exactly 4 points"}), 400
     
     settings = worker.load_settings_dict()
-    settings["queue_roi"] = points if (points and len(points) == 4) else None
+    settings["queue_roi"] = points if points else None
+    worker.save_settings_dict(settings)
+    
+    worker.reload_settings()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/set_people_lines", methods=["POST"])
+@login_required
+def api_set_people_lines():
+    points = request.json.get("points")
+    if points is not None and len(points) != 0:
+        if not isinstance(points, list) or len(points) != 2:
+            return jsonify({"ok": False, "error": "Must have exactly 2 lines"}), 400
+        for line in points:
+            if not isinstance(line, list) or len(line) != 4:
+                return jsonify({"ok": False, "error": "Each line must have exactly 4 values (x1, y1, x2, y2)"}), 400
+    
+    settings = worker.load_settings_dict()
+    settings["people_lines"] = points if points else None
+    worker.save_settings_dict(settings)
+    
+    worker.reload_settings()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/set_box_line", methods=["POST"])
+@login_required
+def api_set_box_line():
+    points = request.json.get("points")
+    if points is not None and len(points) != 0:
+        if not isinstance(points, list) or len(points) != 2:
+            return jsonify({"ok": False, "error": "Must have exactly 2 points for a line"}), 400
+    
+    settings = worker.load_settings_dict()
+    settings["box_line"] = points if points else None
     worker.save_settings_dict(settings)
     
     worker.reload_settings()

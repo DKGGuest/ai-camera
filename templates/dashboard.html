@@ -24,23 +24,40 @@
       
       <div id="queue-roi-controls" style="display: none; margin-top: 10px; background: rgba(255, 255, 255, 0.05); padding: 10px; border-radius: 6px; border: 1px solid #444;">
         <p style="margin: 0 0 8px 0; font-size: 0.9em; color: #ccc; line-height: 1.4;">
-          <strong>Queue Zone Setup:</strong> Click 4 points on the video feed in order (top-left, top-right, bottom-right, bottom-left) to draw a custom box.
+          <strong>Queue Zone Setup:</strong> Select number of queues and click 4 points per queue (top-left, top-right, bottom-right, bottom-left) to draw custom boxes.
         </p>
+        <div style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px;">
+          <label style="color: #fff; font-size: 0.9em;">Number of Queues:</label>
+          <select id="num-queues-select" style="padding: 4px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+          </select>
+        </div>
         <button id="clear-roi-btn" style="padding: 6px 12px; background: #c0392b; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold;">Reset Selection</button>
       </div>
 
       <div id="box-line-controls" style="display: none; margin-top: 10px; background: rgba(255, 255, 255, 0.05); padding: 10px; border-radius: 6px; border: 1px solid #444;">
         <p style="margin: 0 0 8px 0; font-size: 0.9em; color: #ccc; line-height: 1.4;">
-          <strong>Truck Counter Line Setup:</strong> Click 2 points on the video feed to draw the crossing line for boxes/sacks.
+          <strong>Bags & Boxes Counter Line Setup:</strong> Click 2 points on the video feed to draw the crossing line for tracking inventory.
         </p>
         <button id="clear-line-btn" style="padding: 6px 12px; background: #c0392b; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold;">Reset Line</button>
+      </div>
+
+      <div id="people-line-controls" style="display: none; margin-top: 10px; background: rgba(255, 255, 255, 0.05); padding: 10px; border-radius: 6px; border: 1px solid #444;">
+        <p style="margin: 0 0 8px 0; font-size: 0.9em; color: #ccc; line-height: 1.4;">
+          <strong>People Counter Dual-Line Setup:</strong> Click 4 points on the video feed to draw TWO crossing lines (first 2 for Outside Line, next 2 for Inside Line).
+        </p>
+        <button id="clear-people-line-btn" style="padding: 6px 12px; background: #c0392b; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold;">Reset Lines</button>
       </div>
 
       <div class="mode-switcher">
         <span class="label">Active Model:</span>
         {% for m in modes %}
           <button class="mode-btn" data-mode="{{ m }}">
-            {{ {"access": "Access Control (Entry/Exit)", "vehicle": "Vehicle Detection", "adaptive": "Adaptive Bitrate", "people": "People Counter", "worker": "Worker Tracker", "queue": "Queue Monitor", "box": "Box/Sack Counter"}[m] }}
+            {{ {"access": "Access Control (Entry/Exit)", "vehicle": "Vehicle Detection", "adaptive": "Adaptive Bitrate", "people": "People Counter", "worker": "Worker Tracker", "queue": "Queue Monitor", "box": "Bags & Boxes Counter"}[m] }}
           </button>
         {% endfor %}
       </div>

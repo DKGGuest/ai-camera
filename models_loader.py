@@ -20,6 +20,15 @@ def load_yolo_model():
     return YOLO(config.YOLO_MODEL_PATH)
 
 
+def load_custom_box_model():
+    print(f"Loading Custom YOLO model for boxes ({config.CUSTOM_BOX_MODEL_PATH})...")
+    if os.path.exists(config.CUSTOM_BOX_MODEL_PATH):
+        return YOLO(config.CUSTOM_BOX_MODEL_PATH)
+    else:
+        print("Warning: Custom box model not found. Falling back to default YOLO model.")
+        return YOLO(config.YOLO_MODEL_PATH)
+
+
 def load_face_models():
     models_dir = os.path.join(config.BASE_DIR, "models")
     os.makedirs(models_dir, exist_ok=True)

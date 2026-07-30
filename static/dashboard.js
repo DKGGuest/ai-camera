@@ -122,50 +122,54 @@ function drawRoiSvg() {
   
   const rect = roiSvg.getBoundingClientRect();
   
-  roiPoints.forEach((pt, index) => {
-    const cx = pt[0] * rect.width;
-    const cy = pt[1] * rect.height;
+  for (let i = 0; i < roiPoints.length; i += 4) {
+    const chunk = roiPoints.slice(i, i + 4);
+    const queueIndex = Math.floor(i / 4) + 1;
     
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", cx);
-    circle.setAttribute("cy", cy);
-    circle.setAttribute("r", "6");
-    circle.setAttribute("fill", "#00ff00");
-    circle.setAttribute("stroke", "#fff");
-    circle.setAttribute("stroke-width", "2");
-    roiSvg.appendChild(circle);
+    chunk.forEach((pt, index) => {
+      const cx = pt[0] * rect.width;
+      const cy = pt[1] * rect.height;
+      
+      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      circle.setAttribute("cx", cx);
+      circle.setAttribute("cy", cy);
+      circle.setAttribute("r", "6");
+      circle.setAttribute("fill", "#00ff00");
+      circle.setAttribute("stroke", "#fff");
+      circle.setAttribute("stroke-width", "2");
+      roiSvg.appendChild(circle);
+      
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("x", cx + 8);
+      text.setAttribute("y", cy + 5);
+      text.setAttribute("fill", "#fff");
+      text.setAttribute("font-size", "12");
+      text.setAttribute("font-weight", "bold");
+      text.setAttribute("paint-order", "stroke");
+      text.setAttribute("stroke", "#000");
+      text.setAttribute("stroke-width", "3");
+      text.textContent = `Q${queueIndex}.${index + 1}`;
+      roiSvg.appendChild(text);
+    });
     
-    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    text.setAttribute("x", cx + 8);
-    text.setAttribute("y", cy + 5);
-    text.setAttribute("fill", "#fff");
-    text.setAttribute("font-size", "12");
-    text.setAttribute("font-weight", "bold");
-    text.setAttribute("paint-order", "stroke");
-    text.setAttribute("stroke", "#000");
-    text.setAttribute("stroke-width", "3");
-    text.textContent = index + 1;
-    roiSvg.appendChild(text);
-  });
-  
-  if (roiPoints.length > 1) {
-    const pointsStr = roiPoints.map(pt => `${pt[0] * rect.width},${pt[1] * rect.height}`).join(" ");
-    
-    if (roiPoints.length === 4) {
-      const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-      polygon.setAttribute("points", pointsStr);
-      polygon.setAttribute("fill", "rgba(0, 255, 0, 0.15)");
-      polygon.setAttribute("stroke", "#00ff00");
-      polygon.setAttribute("stroke-width", "2");
-      roiSvg.appendChild(polygon);
-    } else {
-      const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-      polyline.setAttribute("points", pointsStr);
-      polyline.setAttribute("fill", "none");
-      polyline.setAttribute("stroke", "#00ff00");
-      polyline.setAttribute("stroke-width", "2");
-      polyline.setAttribute("stroke-dasharray", "4");
-      roiSvg.appendChild(polyline);
+    if (chunk.length > 1) {
+      const pointsStr = chunk.map(pt => `${pt[0] * rect.width},${pt[1] * rect.height}`).join(" ");
+      if (chunk.length === 4) {
+        const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        polygon.setAttribute("points", pointsStr);
+        polygon.setAttribute("fill", "rgba(0, 255, 0, 0.15)");
+        polygon.setAttribute("stroke", "#00ff00");
+        polygon.setAttribute("stroke-width", "2");
+        roiSvg.appendChild(polygon);
+      } else {
+        const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+        polyline.setAttribute("points", pointsStr);
+        polyline.setAttribute("fill", "none");
+        polyline.setAttribute("stroke", "#00ff00");
+        polyline.setAttribute("stroke-width", "2");
+        polyline.setAttribute("stroke-dasharray", "4");
+        roiSvg.appendChild(polyline);
+      }
     }
   }
 }
@@ -175,11 +179,13 @@ window.addEventListener("resize", drawRoiSvg);
 function updateControlsVisibility(mode) {
   if (queueControls) queueControls.style.display = (mode === "queue") ? "block" : "none";
   if (boxLineControls) boxLineControls.style.display = (mode === "box") ? "block" : "none";
+  if (peopleLineControls) peopleLineControls.style.display = (mode === "people") ? "block" : "none";
   
   if (roiSvg) {
-      roiSvg.style.display = (mode === "queue" || mode === "box") ? "block" : "none";
+      roiSvg.style.display = (mode === "queue" || mode === "box" || mode === "people") ? "block" : "none";
       if (mode === "queue") drawRoiSvg();
       else if (mode === "box") drawBoxLineSvg();
+      else if (mode === "people") drawPeopleLineSvg();
   }
 }
 
@@ -222,11 +228,19 @@ if (roiSvg) {
     roiPoints.push([relX, relY]);
     drawRoiSvg();
     
-    if (roiPoints.length === 4) {
+    const selectEl = document.getElementById("num-queues-select");
+    const numQueues = selectEl ? parseInt(selectEl.value) : 1;
+    const maxPoints = numQueues * 4;
+
+    if (roiPoints.length === maxPoints) {
+      let chunks = [];
+      for (let i = 0; i < maxPoints; i += 4) {
+        chunks.push(roiPoints.slice(i, i + 4));
+      }
       const res = await fetch("/api/set_queue_roi", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ points: roiPoints }),
+        body: JSON.stringify({ points: chunks }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -345,10 +359,118 @@ if (clearLineBtn) {
   });
 }
 
+// --- People Counter SVG Logic ---
+const peopleLineControls = document.getElementById("people-line-controls");
+const clearPeopleLineBtn = document.getElementById("clear-people-line-btn");
+let peoplePoints = [];
+
+function drawPeopleLineSvg() {
+  if (!roiSvg) return;
+  roiSvg.innerHTML = "";
+  
+  if (peoplePoints.length === 0) return;
+  
+  const rect = roiSvg.getBoundingClientRect();
+  
+  peoplePoints.forEach((pt, index) => {
+    const cx = pt[0] * rect.width;
+    const cy = pt[1] * rect.height;
+    
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", cx);
+    circle.setAttribute("cy", cy);
+    circle.setAttribute("r", "6");
+    circle.setAttribute("fill", index < 2 ? "#00ff00" : "#00ffff");
+    circle.setAttribute("stroke", "#fff");
+    circle.setAttribute("stroke-width", "2");
+    roiSvg.appendChild(circle);
+  });
+  
+  // Draw first line (outside)
+  if (peoplePoints.length >= 2) {
+    const p1 = peoplePoints[0];
+    const p2 = peoplePoints[1];
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", p1[0] * rect.width);
+    line.setAttribute("y1", p1[1] * rect.height);
+    line.setAttribute("x2", p2[0] * rect.width);
+    line.setAttribute("y2", p2[1] * rect.height);
+    line.setAttribute("stroke", "#00ff00");
+    line.setAttribute("stroke-width", "3");
+    roiSvg.appendChild(line);
+  }
+
+  // Draw second line (inside)
+  if (peoplePoints.length === 4) {
+    const p1 = peoplePoints[2];
+    const p2 = peoplePoints[3];
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", p1[0] * rect.width);
+    line.setAttribute("y1", p1[1] * rect.height);
+    line.setAttribute("x2", p2[0] * rect.width);
+    line.setAttribute("y2", p2[1] * rect.height);
+    line.setAttribute("stroke", "#00ffff");
+    line.setAttribute("stroke-width", "3");
+    roiSvg.appendChild(line);
+  }
+}
+
+if (roiSvg) {
+  roiSvg.addEventListener("click", async (e) => {
+    const activeBtn = document.querySelector(".mode-btn.active");
+    if (!activeBtn || activeBtn.dataset.mode !== "people") return;
+
+    if (peoplePoints.length >= 4) return; // Already have 2 lines
+
+    const rect = roiSvg.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    
+    const relX = clickX / rect.width;
+    const relY = clickY / rect.height;
+    
+    peoplePoints.push([relX, relY]);
+    drawPeopleLineSvg();
+    
+    if (peoplePoints.length === 4) {
+      let chunks = [
+          [peoplePoints[0][0], peoplePoints[0][1], peoplePoints[1][0], peoplePoints[1][1]],
+          [peoplePoints[2][0], peoplePoints[2][1], peoplePoints[3][0], peoplePoints[3][1]]
+      ];
+      const res = await fetch("/api/set_people_lines", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ points: chunks }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert("Error setting lines: " + data.error);
+        peoplePoints = [];
+        drawPeopleLineSvg();
+      }
+    }
+  });
+}
+
+if (clearPeopleLineBtn) {
+  clearPeopleLineBtn.addEventListener("click", async () => {
+    peoplePoints = [];
+    drawPeopleLineSvg();
+    
+    await fetch("/api/set_people_lines", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ points: [] }),
+    });
+  });
+}
+
+
 // Ensure resizing redraws correct SVG
 window.addEventListener("resize", () => {
     if (currentMode === "queue") drawRoiSvg();
     if (currentMode === "box") drawBoxLineSvg();
+    if (currentMode === "people") drawPeopleLineSvg();
 });
 
 // --- Clear Logs ---
@@ -510,8 +632,8 @@ async function pollModelData() {
                 </tr>`;
             }).join("");
         } else if (currentMode === "box") {
-            title = "Truck Loader Box Counter";
-            headers = "<th>Serial No.</th><th>Total Loaded</th><th>Total Unloaded</th><th>Photo</th><th>Date</th><th>Time</th>";
+            title = "Bags & Boxes Counter";
+            headers = "<th>Serial No.</th><th>Boxes IN</th><th>Boxes OUT</th><th>Photo</th><th>Date</th><th>Time</th>";
             rows = data.map(r => {
                 const dt = new Date(r.ts * 1000);
                 const dateStr = dt.toISOString().split('T')[0];
@@ -519,8 +641,8 @@ async function pollModelData() {
                 const imgHtml = r.photo_path ? `<img src="/${r.photo_path}" style="width: 80px; height: 45px; object-fit: cover; border-radius: 4px; border: 1px solid #444;">` : 'N/A';
                 return `<tr>
                     <td>${r.id}</td>
-                    <td><strong style="color: #2ecc71;">${r.loaded_count}</strong></td>
-                    <td><strong style="color: #e74c3c;">${r.unloaded_count}</strong></td>
+                    <td><strong style="color: #2ecc71;">${r.boxes_in}</strong></td>
+                    <td><strong style="color: #e74c3c;">${r.boxes_out}</strong></td>
                     <td>${imgHtml}</td>
                     <td>${dateStr}</td>
                     <td>${timeStr}</td>

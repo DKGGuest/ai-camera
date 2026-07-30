@@ -23,3 +23,4 @@ YOLO_MODEL_PATH = os.path.join(BASE_DIR, "yolov8n.pt")
 # ---------------------------------------------------------------------------
 DEFAULT_CAMERA_URL = os.environ.get("SC_CAMERA_URL", "http://192.168.1.50:81/stream")
 FACE_SIMILARITY_THRESHOLD = 0.363
+CUSTOM_BOX_MODEL_PATH = os.path.join(BASE_DIR, "best.pt")

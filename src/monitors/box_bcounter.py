@@ -1,137 +1,115 @@
 import cv2
 import numpy as np
+import time
 
 class BoxCounter:
     def __init__(self):
-        # We will track boxes (or suitcases as proxy) using a simple centroid tracker
-        self.objects = {} # dict id -> (cx, cy, last_seen, state)
-        self.next_object_id = 1
-        self.max_disappeared = 5
-        self.disappeared = {}
+        self.counts = {
+            "box": {"in": 0, "out": 0},
+            "bag": {"in": 0, "out": 0}
+        }
         
-        self.loaded_count = 0
-        self.unloaded_count = 0
+        # Track history: dict of track_id -> dict with history, class_name, counted
+        self.tracks = {}
         
-    def _register(self, centroid):
-        self.objects[self.next_object_id] = {'centroid': centroid, 'state': None}
-        self.disappeared[self.next_object_id] = 0
-        self.next_object_id += 1
-
-    def _deregister(self, object_id):
-        del self.objects[object_id]
-        del self.disappeared[object_id]
-        
-    def _get_zone(self, centroid, line_pt1, line_pt2):
-        if line_pt1 is None or line_pt2 is None:
-            return None
-            
-        x, y = centroid
-        x1, y1 = line_pt1
-        x2, y2 = line_pt2
-        
-        # Calculate cross product to determine side of the line
-        # > 0 is one side, < 0 is the other
-        position = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
-        return "loaded_side" if position > 0 else "unloaded_side"
-        
-    def process_frame(self, frame, boxes, line_points):
-        """
-        boxes: list of dicts with 'bbox': [x1,y1,x2,y2] from YOLO
-        line_points: [(x1,y1), (x2,y2)] relative coordinates (0-1)
-        """
+    def process_frame(self, frame, results, line_points):
         h, w = frame.shape[:2]
+        events = []
+        now = time.time()
         
         line_pt1 = (int(line_points[0][0] * w), int(line_points[0][1] * h)) if line_points and len(line_points) == 2 else None
         line_pt2 = (int(line_points[1][0] * w), int(line_points[1][1] * h)) if line_points and len(line_points) == 2 else None
         
         if line_pt1 and line_pt2:
-            cv2.line(frame, line_pt1, line_pt2, (255, 0, 0), 2)
-            cv2.putText(frame, "Loaded", (line_pt1[0], line_pt1[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
-            cv2.putText(frame, "Unloaded", (line_pt2[0], line_pt2[1] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+            # Draw distinct line (CYAN)
+            cv2.line(frame, line_pt1, line_pt2, (255, 255, 0), 2)
+            cv2.putText(frame, "IN / OUT LINE", (line_pt1[0], line_pt1[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
-        input_centroids = np.zeros((len(boxes), 2), dtype="int")
-        for i, box in enumerate(boxes):
-            x1, y1, x2, y2 = map(int, box['bbox'])
-            cx = int((x1 + x2) / 2)
-            cy = int((y1 + y2) / 2)
-            input_centroids[i] = (cx, cy)
+        def ccw(A, B, C):
+            return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
             
-            # Draw bbox
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 165, 0), 2)
-            cv2.circle(frame, (cx, cy), 4, (255, 165, 0), -1)
+        def intersect(A, B, C, D):
+            return ccw(A, C, D) != ccw(B, C, D) and ccw(A, B, C) != ccw(A, B, D)
+            
+        def get_side(pt, line):
+            x, y = pt
+            (x1, y1), (x2, y2) = line
+            # standard line equation: (y2-y1)*x - (x2-x1)*y + x2*y1 - y2*x1
+            return (y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1
 
-        event_occurred = False
-        event_type = None
-        
-        if len(input_centroids) == 0:
-            for object_id in list(self.disappeared.keys()):
-                self.disappeared[object_id] += 1
-                if self.disappeared[object_id] > self.max_disappeared:
-                    self._deregister(object_id)
-            return frame, False, None # No event
+        if results and results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu()
+            ids = results[0].boxes.id.int().cpu().tolist()
+            classes = results[0].boxes.cls.int().cpu().tolist()
+            confs = results[0].boxes.conf.cpu().tolist()
+            names = results[0].names
             
-        if len(self.objects) == 0:
-            for i in range(0, len(input_centroids)):
-                self._register(input_centroids[i])
-        else:
-            object_ids = list(self.objects.keys())
-            object_centroids = [self.objects[oid]['centroid'] for oid in object_ids]
+            used_ids = set(ids)
             
-            D = np.linalg.norm(np.array(object_centroids)[:, np.newaxis] - input_centroids, axis=2)
-            
-            rows = D.min(axis=1).argsort()
-            cols = D.argmin(axis=1)[rows]
-            
-            used_rows = set()
-            used_cols = set()
-            
-            event_occurred = False
-            event_type = None
-            
-            for (row, col) in zip(rows, cols):
-                if row in used_rows or col in used_cols:
-                    continue
-                if D[row, col] > 50:
-                    continue
-                    
-                object_id = object_ids[row]
-                self.objects[object_id]['centroid'] = input_centroids[col]
-                self.disappeared[object_id] = 0
+            for box, track_id, cls_id, conf in zip(boxes, ids, classes, confs):
+                x1, y1, x2, y2 = map(int, box)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 
-                # Check line crossing
-                if line_pt1 and line_pt2:
-                    current_zone = self._get_zone(input_centroids[col], line_pt1, line_pt2)
-                    prev_zone = self.objects[object_id]['state']
+                # Class 0: box (Green), Class 1: bag (Orange)
+                # Fallback: if using standard COCO, map 'person' or 'backpack' to bag just for testing
+                cls_name = names[cls_id]
+                is_bag = (cls_name == 'bag' or cls_id == 1 or cls_name == 'backpack' or cls_name == 'suitcase')
+                is_box = not is_bag
+                
+                cat_name = "bag" if is_bag else "box"
+                color = (0, 165, 255) if is_bag else (0, 255, 0)
+                
+                if track_id not in self.tracks:
+                    self.tracks[track_id] = {
+                        "history": (cx, cy),
+                        "counted": False,
+                        "class_name": cat_name,
+                        "last_update": now,
+                        "side": get_side((cx,cy), (line_pt1, line_pt2)) if line_pt1 else 0
+                    }
+                else:
+                    t = self.tracks[track_id]
+                    t["last_update"] = now
+                    prev_pt = t["history"]
+                    curr_pt = (cx, cy)
+                    t["history"] = curr_pt
                     
-                    if prev_zone is not None and current_zone != prev_zone:
-                        if prev_zone == "unloaded_side" and current_zone == "loaded_side":
-                            self.loaded_count += 1
-                            event_occurred = True
-                            event_type = "loaded"
-                        elif prev_zone == "loaded_side" and current_zone == "unloaded_side":
-                            self.unloaded_count += 1
-                            event_occurred = True
-                            event_type = "unloaded"
+                    if not t["counted"] and line_pt1 and line_pt2:
+                        # Check intersection
+                        if intersect(prev_pt, curr_pt, line_pt1, line_pt2):
+                            # It crossed! Direction depends on old side vs new side
+                            curr_side = get_side(curr_pt, (line_pt1, line_pt2))
+                            prev_side = t["side"]
+                            t["side"] = curr_side
                             
-                    self.objects[object_id]['state'] = current_zone
-                
-                used_rows.add(row)
-                used_cols.add(col)
-                
-            unused_rows = set(range(0, D.shape[0])).difference(used_rows)
-            unused_cols = set(range(0, D.shape[1])).difference(used_cols)
-            
-            for row in unused_rows:
-                object_id = object_ids[row]
-                self.disappeared[object_id] += 1
-                if self.disappeared[object_id] > self.max_disappeared:
-                    self._deregister(object_id)
-                    
-            for col in unused_cols:
-                self._register(input_centroids[col])
-                
-        # Draw counts on frame
-        cv2.putText(frame, f"Loaded: {self.loaded_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, f"Unloaded: {self.unloaded_count}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                            if prev_side > 0 and curr_side < 0:
+                                self.counts[cat_name]["in"] += 1
+                                events.append({"type": f"{cat_name}_in", "track_id": track_id})
+                                t["counted"] = True
+                            elif prev_side < 0 and curr_side > 0:
+                                self.counts[cat_name]["out"] += 1
+                                events.append({"type": f"{cat_name}_out", "track_id": track_id})
+                                t["counted"] = True
 
-        return frame, event_occurred, event_type
+                # Draw bounding box
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.circle(frame, (cx, cy), 3, (0, 0, 255), -1)
+                
+                label = f"{cat_name.upper()} {track_id} ({conf:.2f})"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.rectangle(frame, (x1, y1 - 20), (x1 + tw, y1), color, -1)
+                cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+            # Cleanup old tracks
+            to_delete = []
+            for tid, t in self.tracks.items():
+                if now - t["last_update"] > 5.0:
+                    to_delete.append(tid)
+            for tid in to_delete:
+                del self.tracks[tid]
+                
+        # Draw HUD
+        cv2.rectangle(frame, (10, 10), (280, 60), (0, 0, 0), -1)
+        cv2.putText(frame, f"Boxes IN: {self.counts['box']['in']}   OUT: {self.counts['box']['out']}", (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        return frame, events

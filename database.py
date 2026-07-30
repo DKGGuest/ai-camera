@@ -76,7 +76,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS queue_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts REAL NOT NULL,
-                person_count INTEGER NOT NULL,
+                person_count TEXT NOT NULL,
                 photo_path TEXT
             )
             """
@@ -104,6 +104,21 @@ def init_db():
                 ts REAL NOT NULL,
                 loaded_count INTEGER NOT NULL,
                 unloaded_count INTEGER NOT NULL,
+                photo_path TEXT
+            )
+            """
+        )
+        
+        # Bag & Box Logs Table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bag_box_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                boxes_in INTEGER NOT NULL,
+                boxes_out INTEGER NOT NULL,
+                bags_in INTEGER NOT NULL,
+                bags_out INTEGER NOT NULL,
                 photo_path TEXT
             )
             """
@@ -223,6 +238,16 @@ def log_box(loaded_count, unloaded_count, photo_path):
         conn.commit()
         conn.close()
 
+def log_bag_box(boxes_in, boxes_out, bags_in, bags_out, photo_path):
+    with _lock:
+        conn = _connect()
+        conn.execute(
+            "INSERT INTO bag_box_logs (ts, boxes_in, boxes_out, bags_in, bags_out, photo_path) VALUES (?, ?, ?, ?, ?, ?)",
+            (time.time(), boxes_in, boxes_out, bags_in, bags_out, photo_path)
+        )
+        conn.commit()
+        conn.close()
+
 # Function to fetch data by model
 def get_model_data(mode, limit=50):
     with _lock:
@@ -241,7 +266,7 @@ def get_model_data(mode, limit=50):
             elif mode == "worker":
                 rows = conn.execute("SELECT id, ts, worker_name, work_time_s, rest_time_s, photo_path FROM worker_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             elif mode == "box":
-                rows = conn.execute("SELECT id, ts, loaded_count, unloaded_count, photo_path FROM box_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+                rows = conn.execute("SELECT id, ts, boxes_in, boxes_out, bags_in, bags_out, photo_path FROM bag_box_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         except sqlite3.OperationalError:
             # Table might not be migrated, just select *
             rows = conn.execute(f"SELECT * FROM {mode}_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

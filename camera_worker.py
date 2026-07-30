@@ -121,10 +121,10 @@ class CameraWorker:
 
         # People-counter state
         self._people_tracks = {}
-        self._people_next_id = 0
         self._people_entry_count = 0
         self._people_exit_count = 0
         self._last_people_photo = 0.0
+        self._people_lines = settings.get("people_lines", [])
 
         # Worker-tracker state
         self._gender_net = None
@@ -167,6 +167,7 @@ class CameraWorker:
         self.camera_url = settings.get("camera_url", config.DEFAULT_CAMERA_URL)
         self.mode = settings.get("mode", "access")
         self.queue_roi = settings.get("queue_roi", None)
+        self._people_lines = settings.get("people_lines", [])
 
     def load_settings_dict(self):
         return load_settings()
@@ -196,6 +197,10 @@ class CameraWorker:
     def set_box_line(self, points):
         with self._status_lock:
             self._box_line = points
+
+    def set_people_lines(self, lines):
+        with self._status_lock:
+            self._people_lines = lines
 
     def reload_known_faces(self):
         self._ensure_models_loaded()
@@ -232,6 +237,8 @@ class CameraWorker:
     def _ensure_models_loaded(self):
         if self._yolo is None:
             self._yolo = models_loader.load_yolo_model()
+        if not hasattr(self, '_custom_box_model') or self._custom_box_model is None:
+            self._custom_box_model = models_loader.load_custom_box_model()
         self._box_counter = BoxCounter()
         self._face_detector, self._face_recognizer = models_loader.load_face_models()
         self._known_embeddings = models_loader.load_known_faces(
@@ -239,11 +246,26 @@ class CameraWorker:
         )
 
     def _open_capture(self):
-        src = int(self.camera_url) if str(self.camera_url).isdigit() else self.camera_url
-        # Always use FFMPEG to enforce nobuffer options and avoid MSMF lag on Windows
-        cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return cap
+        if str(self.camera_url).isdigit():
+            src = int(self.camera_url)
+            # For local USB webcams on Windows, DirectShow is the lowest latency backend
+            cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # Optional: force 30fps to avoid camera driver buffering
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            return cap
+        else:
+            src = self.camera_url
+            import urllib.parse
+            parsed = urllib.parse.urlparse(src)
+            # If the user enters a raw IP:PORT from an app like Android "IP Webcam", the actual stream is at /video
+            if parsed.scheme in ('http', 'https') and parsed.path in ('', '/'):
+                src = src.rstrip('/') + '/video'
+                
+            # For network streams (RTSP/HTTP), use FFMPEG with no-buffer flags
+            cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            return cap
 
     def _capture_loop(self):
         """Runs in its own thread, doing nothing but keeping self._raw_frame as fresh
@@ -505,73 +527,114 @@ class CameraWorker:
     # ------------------------------------------------------------------ #
     def _process_people(self, frame):
         height, width = frame.shape[:2]
-        counting_line_y = height // 3
-        buffer_px = 40
-        upper_y, lower_y = counting_line_y - buffer_px, counting_line_y + buffer_px
+        
+        # Default lines if not set in UI
+        if not self._people_lines or len(self._people_lines) != 2:
+            gap = 30
+            mid_x = width // 2
+            line1 = [(mid_x - gap, 0), (mid_x - gap, height)]
+            line2 = [(mid_x + gap, 0), (mid_x + gap, height)]
+        else:
+            pts = self._people_lines
+            line1 = [
+                (int(pts[0][0] * width), int(pts[0][1] * height)),
+                (int(pts[0][2] * width), int(pts[0][3] * height))
+            ]
+            line2 = [
+                (int(pts[1][0] * width), int(pts[1][1] * height)),
+                (int(pts[1][2] * width), int(pts[1][3] * height))
+            ]
 
-        results = self._yolo(frame, classes=[PERSON_CLASS], verbose=False)
-        detections = []
-        if results[0].boxes is not None:
-            for box in results[0].boxes.xyxy.cpu():
-                x1, y1, x2, y2 = map(int, box)
-                detections.append(((x1 + x2) // 2, (y1 + y2) // 2))
+        results = self._yolo.track(frame, persist=True, classes=[PERSON_CLASS], verbose=False, conf=0.35)
+        
+        def ccw(A, B, C):
+            return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
+            
+        def intersect(A, B, C, D):
+            return ccw(A, C, D) != ccw(B, C, D) and ccw(A, B, C) != ccw(A, B, D)
 
-        # Match detections to existing tracks by nearest centroid
-        used_ids = set()
-        for cx, cy in detections:
-            best_id, best_dist = None, float("inf")
-            for tid, data in self._people_tracks.items():
-                if tid in used_ids:
-                    continue
-                dist = math.hypot(cx - data["cx"], cy - data["cy"])
-                if dist < 80 and dist < best_dist:
-                    best_dist, best_id = dist, tid
-
-            if best_id is None:
-                best_id = self._people_next_id
-                self._people_next_id += 1
-                zone = "above" if cy < upper_y else "below" if cy > lower_y else "buffer"
-                self._people_tracks[best_id] = {"cx": cx, "cy": cy, "state": zone, "lost": 0}
-            else:
-                data = self._people_tracks[best_id]
-                prev_zone = data["state"]
-                zone = "above" if cy < upper_y else "below" if cy > lower_y else "buffer"
-                if prev_zone in ("above",) and zone == "below":
-                    self._people_entry_count += 1
-                    database.log_event("people", "entry", f"Track {best_id}", "info")
-                    photo_path = f"static/events/{int(time.time())}_people_entry.jpg"
-                    cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
-                    database.log_people("entry", self._people_entry_count, self._people_exit_count, photo_path)
-                elif prev_zone in ("below",) and zone == "above":
-                    self._people_exit_count += 1
-                    database.log_event("people", "exit", f"Track {best_id}", "info")
-                    photo_path = f"static/events/{int(time.time())}_people_exit.jpg"
-                    cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
-                    database.log_people("exit", self._people_entry_count, self._people_exit_count, photo_path)
-                data.update({"cx": cx, "cy": cy, "state": zone, "lost": 0})
-
-            used_ids.add(best_id)
-            cv2.circle(frame, (cx, cy), 5, (0, 255, 255), -1)
-
-        for tid in list(self._people_tracks.keys()):
-            if tid not in used_ids:
-                self._people_tracks[tid]["lost"] += 1
-                if self._people_tracks[tid]["lost"] > 15:
-                    del self._people_tracks[tid]
+        # Draw lines
+        cv2.line(frame, line1[0], line1[1], (0, 255, 0), 2)
+        cv2.line(frame, line2[0], line2[1], (0, 255, 255), 2)
+        cv2.putText(frame, "L1 (OUTSIDE)", (line1[0][0] + 10, line1[0][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        cv2.putText(frame, "L2 (INSIDE)", (line2[0][0] + 10, line2[0][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
         now = time.time()
+        
+        if results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu()
+            ids = results[0].boxes.id.int().cpu().tolist()
+            
+            for box, track_id in zip(boxes, ids):
+                x1, y1, x2, y2 = map(int, box)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                
+                if track_id not in self._people_tracks:
+                    self._people_tracks[track_id] = {
+                        "history": (cx, cy),
+                        "crossings": [],
+                        "counted": False,
+                        "last_update": now
+                    }
+                else:
+                    t = self._people_tracks[track_id]
+                    t["last_update"] = now
+                    prev_pt = t["history"]
+                    curr_pt = (cx, cy)
+                    t["history"] = curr_pt
+                    
+                    if not t["counted"]:
+                        crossed = None
+                        if intersect(prev_pt, curr_pt, line1[0], line1[1]):
+                            crossed = 1
+                        elif intersect(prev_pt, curr_pt, line2[0], line2[1]):
+                            crossed = 2
+                            
+                        if crossed:
+                            if not t["crossings"] or t["crossings"][-1] != crossed:
+                                t["crossings"].append(crossed)
+                                
+                        if len(t["crossings"]) >= 2:
+                            if t["crossings"][-2:] == [1, 2]:
+                                self._people_entry_count += 1
+                                t["counted"] = "IN"
+                                database.log_event("people", "entry", f"Track {track_id}", "info")
+                                photo_path = f"static/events/{int(now)}_people_entry.jpg"
+                                cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
+                                database.log_people("entry", self._people_entry_count, self._people_exit_count, photo_path)
+                            elif t["crossings"][-2:] == [2, 1]:
+                                self._people_exit_count += 1
+                                t["counted"] = "OUT"
+                                database.log_event("people", "exit", f"Track {track_id}", "info")
+                                photo_path = f"static/events/{int(now)}_people_exit.jpg"
+                                cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
+                                database.log_people("exit", self._people_entry_count, self._people_exit_count, photo_path)
+                
+                color = (0, 165, 255) # Thin bounding box (orange)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+                cv2.circle(frame, (cx, cy), 3, (0, 0, 255), -1)
+                cv2.putText(frame, f"ID: {track_id}", (x1, max(y1 - 5, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Cleanup old tracks
+        to_delete = []
+        for tid, t in self._people_tracks.items():
+            if now - t["last_update"] > 5.0: # 5 seconds cooldown
+                to_delete.append(tid)
+        for tid in to_delete:
+            del self._people_tracks[tid]
+            
         if now - self._last_people_photo > 5.0:
             self._last_people_photo = now
             photo_path = f"static/events/{int(now)}_people_periodic.jpg"
             cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
             database.log_people("periodic", self._people_entry_count, self._people_exit_count, photo_path)
 
-        cv2.line(frame, (0, counting_line_y), (width, counting_line_y), (255, 0, 0), 2)
-        cv2.rectangle(frame, (10, 10), (250, 90), (0, 0, 0), -1)
-        cv2.putText(frame, f"Entries: {self._people_entry_count}", (18, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, f"Exits: {self._people_exit_count}", (18, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.rectangle(frame, (10, 10), (320, 120), (0, 0, 0), -1)
+        cv2.putText(frame, f"IN: {self._people_entry_count}", (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        cv2.putText(frame, f"OUT: {self._people_exit_count}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+        inside_count = max(0, self._people_entry_count - self._people_exit_count)
+        cv2.putText(frame, f"Currently Inside: {inside_count}", (20, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        
         return frame
 
     # ------------------------------------------------------------------ #
@@ -1005,27 +1068,45 @@ class CameraWorker:
     def _process_queue(self, frame):
         height, width = frame.shape[:2]
         
-        # Load custom 4-point ROI if set, otherwise fallback to default rectangle
-        if self.queue_roi and len(self.queue_roi) == 4:
-            pts = np.array([[int(p[0] * width), int(p[1] * height)] for p in self.queue_roi], np.int32)
-        else:
+        # Load custom ROIs
+        queue_rois = []
+        if self.queue_roi and isinstance(self.queue_roi, list) and len(self.queue_roi) > 0:
+            if isinstance(self.queue_roi[0][0], list) or isinstance(self.queue_roi[0][0], tuple):
+                # Multiple queues
+                for roi in self.queue_roi:
+                    if len(roi) == 4:
+                        pts = np.array([[int(p[0] * width), int(p[1] * height)] for p in roi], np.int32)
+                        queue_rois.append(pts)
+            elif len(self.queue_roi) == 4:
+                # Single queue (backwards compatibility)
+                pts = np.array([[int(p[0] * width), int(p[1] * height)] for p in self.queue_roi], np.int32)
+                queue_rois.append(pts)
+        
+        if not queue_rois:
             pts = np.array([
                 [int(width * 0.1), int(height * 0.4)],
                 [int(width * 0.9), int(height * 0.4)],
                 [int(width * 0.9), int(height * 0.9)],
                 [int(width * 0.1), int(height * 0.9)]
             ], np.int32)
-            
-        cv2.polylines(frame, [pts], isClosed=True, color=(255, 255, 0), thickness=2)
+            queue_rois.append(pts)
+
+        # Draw ROIs
         overlay = frame.copy()
-        cv2.fillPoly(overlay, [pts], (255, 255, 0))
+        for i, pts in enumerate(queue_rois):
+            cv2.polylines(frame, [pts], isClosed=True, color=(255, 255, 0), thickness=2)
+            cv2.fillPoly(overlay, [pts], (255, 255, 0))
+            cv2.putText(frame, f"LINE {i+1}", (pts[0][0], max(30, pts[0][1] - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
         cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
-        cv2.putText(frame, "QUEUE ZONE", (pts[0][0], max(30, pts[0][1] - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 
         # Run YOLO with a lower confidence threshold (0.15) to detect heavily occluded people in the queue zone
         results = self._yolo(frame, classes=[PERSON_CLASS], conf=0.15, verbose=False)
-        people_in_line = 0
+        
+        # Track counts per line
+        line_counts = [0] * len(queue_rois)
+        total_people = 0
+        
         if results[0].boxes is not None:
             person_candidates, person_scores = [], []
             for box, conf in zip(results[0].boxes.xyxy.cpu(), results[0].boxes.conf.cpu()):
@@ -1040,52 +1121,100 @@ class CameraWorker:
                 x1, y1, x2, y2 = person_candidates[idx]
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 
-                # Check if person's center is inside custom polygon ROI
-                in_line = cv2.pointPolygonTest(pts, (cx, cy), False) >= 0
-                color = (0, 255, 0) if in_line else (0, 0, 255)
-                if in_line:
-                    people_in_line += 1
+                # Check if person's center is inside any custom polygon ROI
+                in_line_idx = -1
+                for i, pts in enumerate(queue_rois):
+                    if cv2.pointPolygonTest(pts, (cx, cy), False) >= 0:
+                        in_line_idx = i
+                        break
+                        
+                color = (0, 255, 0) if in_line_idx != -1 else (0, 0, 255)
+                if in_line_idx != -1:
+                    line_counts[in_line_idx] += 1
+                    total_people += 1
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.circle(frame, (cx, cy), 5, color, -1)
 
-        cv2.rectangle(frame, (10, 10), (400, 80), (0, 0, 0), -1)
-        count_color = (0, 255, 0) if people_in_line <= 7 else (0, 0, 255)
-        cv2.putText(frame, f"People in Line: {people_in_line}", (20, 55),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, count_color, 3)
+        # Draw counts for all lines
+        cv2.rectangle(frame, (10, 10), (400, 40 + 35 * len(queue_rois)), (0, 0, 0), -1)
+        for i, count in enumerate(line_counts):
+            count_color = (0, 255, 0) if count <= 7 else (0, 0, 255)
+            cv2.putText(frame, f"Line {i+1}: {count} person", (20, 45 + 35 * i),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, count_color, 3)
 
         if time.time() - self._queue_last_alarm > 2.0:
-            if people_in_line > 7:
+            if any(c > 7 for c in line_counts):
                 os.system("afplay /System/Library/Sounds/Ping.aiff &")
+                
             if time.time() - self._last_queue_photo > 5.0:
                 self._last_queue_photo = time.time()
-                photo_path = f"static/events/{int(time.time())}_queue_{people_in_line}.jpg"
+                
+                # Format the log string: "line 1=2 , line 2=4"
+                log_parts = [f"line {i+1}={c}" for i, c in enumerate(line_counts)]
+                log_str = " , ".join(log_parts)
+                
+                photo_path = f"static/events/{int(time.time())}_queue_{total_people}.jpg"
                 cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
-                database.log_queue(people_in_line, photo_path)
+                database.log_queue(log_str, photo_path)
             
-        if people_in_line >= 5 and time.time() - self._queue_last_alarm > 10.0:
-            database.log_event("queue", "long_queue", f"{people_in_line} people in line!", "alert")
+        if any(c >= 5 for c in line_counts) and time.time() - self._queue_last_alarm > 10.0:
+            alert_str = " , ".join([f"line {i+1}={c}" for i, c in enumerate(line_counts) if c >= 5])
+            database.log_event("queue", "long_queue", alert_str, "alert")
+            self._queue_last_alarm = time.time()
 
         return frame
 
+    def _refine_box(self, frame, b):
+        x1, y1, x2, y2 = map(int, b)
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            return b
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 30, 100)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        edges = cv2.dilate(edges, kernel, iterations=1)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours: return b
+        valid = [c for c in contours if cv2.contourArea(c) > 1000]
+        if not valid: return b
+        largest = max(valid, key=cv2.contourArea)
+        rx, ry, rw, rh = cv2.boundingRect(largest)
+        if rw * rh < (x2-x1) * (y2-y1) * 0.10: return b
+        pad = 10
+        return [float(max(x1, x1 + rx - pad)), float(max(y1, y1 + ry - pad)), 
+                float(min(x2, x1 + rx + rw + pad)), float(min(y2, y1 + ry + rh + pad))]
+
     def _process_box(self, frame):
-        # We'll use YOLOv8 class 28 (suitcase) as a proxy for box/sack for this demonstration
-        results = self._yolo(frame, classes=[28], conf=0.2, verbose=False)
-        r = results[0]
-        boxes = []
-        for box in r.boxes:
-            b = box.xyxy[0].cpu().numpy()
-            boxes.append({'bbox': b})
-            
-        with self._status_lock:
-            line_pts = list(self._box_line)
-            
-        out_frame, event_occurred, event_type = self._box_counter.process_frame(frame.copy(), boxes, line_pts)
+        # conf=0.25 to ensure the custom model detects the box
+        results = self._custom_box_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=0.25, verbose=False)
         
-        if event_occurred:
-            database.log_event("box", event_type, f"A box was {event_type}", "info")
-            photo_path = f"static/events/{int(time.time())}_box_{event_type}.jpg"
-            cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), out_frame)
-            database.log_box(self._box_counter.loaded_count, self._box_counter.unloaded_count, photo_path)
+        with self._status_lock:
+            if not self._box_line:
+                height, width = frame.shape[:2]
+                mid_x = width // 2
+                line_pts = [(mid_x / width, 0.0), (mid_x / width, 1.0)]
+            else:
+                line_pts = list(self._box_line)
+            
+        out_frame, events = self._box_counter.process_frame(frame.copy(), results, line_pts)
+        
+        if events:
+            for i, event in enumerate(events):
+                event_type = event["type"]
+                track_id = event["track_id"]
+                database.log_event("box", event_type, f"Track ID: {track_id}", "info")
+                
+                if i == 0:
+                    photo_path = f"static/events/{int(time.time())}_box_{event_type}_{track_id}.jpg"
+                    cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), out_frame)
+                    database.log_bag_box(
+                        self._box_counter.counts['box']['in'],
+                        self._box_counter.counts['box']['out'],
+                        self._box_counter.counts['bag']['in'],
+                        self._box_counter.counts['bag']['out'],
+                        photo_path
+                    )
             
         return out_frame
 
