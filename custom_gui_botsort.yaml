@@ -1,0 +1,3 @@
+tracker_type: botsort
+track_buffer: 90
+with_reid: True

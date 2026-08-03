@@ -114,6 +114,13 @@ def api_clear_events():
     return jsonify({"ok": True})
 
 
+@app.route("/api/reset_people_counts", methods=["POST"])
+@login_required
+def api_reset_people_counts():
+    worker.reset_people_counts()
+    return jsonify({"ok": True})
+
+
 # --------------------------------------------------------------------------- #
 # Enroll known faces (upload photo OR capture current frame)
 # --------------------------------------------------------------------------- #

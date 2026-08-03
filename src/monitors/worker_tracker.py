@@ -171,11 +171,11 @@ def estimate_head_pose(landmarks, fy, fh, py1, py2):
     person_h = py2 - py1
     face_rel_y = face_center_y / person_h if person_h > 0 else 0.5
 
-    # WORKING = all three conditions met
+    # WORKING = all three conditions met (relaxed to prevent false negatives for side profiles and looking down)
     looking_at_screen = (
-        abs(yaw_ratio) < 0.35 and   # Not looking too far left/right
-        pitch_ratio > 0.25 and       # Not head down (sleeping/frustrated)
-        face_rel_y < 0.55            # Not slumped over desk
+        abs(yaw_ratio) < 0.9 and     # Allow looking sideways (up to near profile)
+        pitch_ratio > -0.2 and       # Allow looking down at a laptop
+        face_rel_y < 0.75            # Allow lower posture
     )
 
     return looking_at_screen
@@ -423,8 +423,9 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
                                 has_laptop = True
                                 break
 
-                    # WORKING = near laptop + looking at screen + no phone
-                    raw_working = has_laptop and looking_at_screen and not phone_near
+                    # WORKING = (near laptop OR looking at screen) and no phone
+                    # This prevents false negatives for people whose faces aren't perfectly detected or who are in profile.
+                    raw_working = (has_laptop or looking_at_screen) and not phone_near
 
                     # Update or create state
                     st = worker_states.get(tid)

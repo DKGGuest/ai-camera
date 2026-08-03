@@ -465,6 +465,13 @@ if (clearPeopleLineBtn) {
   });
 }
 
+const resetPeopleCountBtn = document.getElementById("reset-people-count-btn");
+if (resetPeopleCountBtn) {
+  resetPeopleCountBtn.addEventListener("click", async () => {
+    await fetch("/api/reset_people_counts", { method: "POST" });
+  });
+}
+
 
 // Ensure resizing redraws correct SVG
 window.addEventListener("resize", () => {

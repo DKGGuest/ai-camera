@@ -9,7 +9,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffe
 import cv2
 import numpy as np
 
-from src.monitors.box_bcounter import BoxCounter
+from src.monitors.box_counter import BoxCounter
 import src.core.models as models
 
 import config
@@ -147,7 +147,7 @@ class CameraWorker:
         self._queue_roi = []
         
         # Box Counter setup
-        self._box_line = []
+        self._box_line = settings.get("box_line", [])
 
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -168,6 +168,7 @@ class CameraWorker:
         self.mode = settings.get("mode", "access")
         self.queue_roi = settings.get("queue_roi", None)
         self._people_lines = settings.get("people_lines", [])
+        self._box_line = settings.get("box_line", [])
 
     def load_settings_dict(self):
         return load_settings()
@@ -201,6 +202,12 @@ class CameraWorker:
     def set_people_lines(self, lines):
         with self._status_lock:
             self._people_lines = lines
+
+    def reset_people_counts(self):
+        with self._status_lock:
+            self._people_entry_count = 0
+            self._people_exit_count = 0
+            self._people_tracks.clear()
 
     def reload_known_faces(self):
         self._ensure_models_loaded()
@@ -530,7 +537,7 @@ class CameraWorker:
         
         # Default lines if not set in UI
         if not self._people_lines or len(self._people_lines) != 2:
-            gap = 30
+            gap = int(width * 0.15)
             mid_x = width // 2
             line1 = [(mid_x - gap, 0), (mid_x - gap, height)]
             line2 = [(mid_x + gap, 0), (mid_x + gap, height)]
@@ -545,7 +552,7 @@ class CameraWorker:
                 (int(pts[1][2] * width), int(pts[1][3] * height))
             ]
 
-        results = self._yolo.track(frame, persist=True, classes=[PERSON_CLASS], verbose=False, conf=0.35)
+        results = self._yolo.track(frame, persist=True, classes=[PERSON_CLASS], verbose=False, conf=0.35, tracker="custom_botsort.yaml")
         
         def ccw(A, B, C):
             return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
@@ -571,44 +578,80 @@ class CameraWorker:
                 
                 if track_id not in self._people_tracks:
                     self._people_tracks[track_id] = {
-                        "history": (cx, cy),
+                        "history": [(cx, cy, now)],
                         "crossings": [],
-                        "counted": False,
-                        "last_update": now
+                        "last_cross_time": 0,
+                        "last_counted_time": 0,
+                        "last_update": now,
+                        "first_seen": now
                     }
                 else:
                     t = self._people_tracks[track_id]
                     t["last_update"] = now
-                    prev_pt = t["history"]
+                    t["history"].append((cx, cy, now))
+                    if len(t["history"]) > 30:
+                        t["history"].pop(0)
+                        
+                    prev_pt = (t["history"][-2][0], t["history"][-2][1]) if len(t["history"]) > 1 else (cx, cy)
                     curr_pt = (cx, cy)
-                    t["history"] = curr_pt
                     
-                    if not t["counted"]:
-                        crossed = None
+                    if now - t.get("last_counted_time", 0) > 2.0:
+                        crossed_lines = []
                         if intersect(prev_pt, curr_pt, line1[0], line1[1]):
-                            crossed = 1
-                        elif intersect(prev_pt, curr_pt, line2[0], line2[1]):
-                            crossed = 2
+                            crossed_lines.append(1)
+                        if intersect(prev_pt, curr_pt, line2[0], line2[1]):
+                            crossed_lines.append(2)
                             
-                        if crossed:
+                        if len(crossed_lines) == 2:
+                            dist1 = abs(prev_pt[0] - line1[0][0])
+                            dist2 = abs(prev_pt[0] - line2[0][0])
+                            if dist1 < dist2:
+                                crossed_lines = [1, 2]
+                            else:
+                                crossed_lines = [2, 1]
+                                
+                        for crossed in crossed_lines:
+                            if t.get("last_cross_time", 0) and now - t["last_cross_time"] > 5.0:
+                                t["crossings"] = []
                             if not t["crossings"] or t["crossings"][-1] != crossed:
                                 t["crossings"].append(crossed)
+                                t["last_cross_time"] = now
                                 
                         if len(t["crossings"]) >= 2:
-                            if t["crossings"][-2:] == [1, 2]:
-                                self._people_entry_count += 1
-                                t["counted"] = "IN"
-                                database.log_event("people", "entry", f"Track {track_id}", "info")
-                                photo_path = f"static/events/{int(now)}_people_entry.jpg"
-                                cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
-                                database.log_people("entry", self._people_entry_count, self._people_exit_count, photo_path)
-                            elif t["crossings"][-2:] == [2, 1]:
-                                self._people_exit_count += 1
-                                t["counted"] = "OUT"
-                                database.log_event("people", "exit", f"Track {track_id}", "info")
-                                photo_path = f"static/events/{int(now)}_people_exit.jpg"
-                                cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
-                                database.log_people("exit", self._people_entry_count, self._people_exit_count, photo_path)
+                            seq = t["crossings"][-2:]
+                            if seq == [1, 2] or seq == [2, 1]:
+                                oldest_pt = t["history"][0]
+                                displacement = math.hypot(cx - oldest_pt[0], cy - oldest_pt[1])
+                                min_dist = 0.3 * (x2 - x1)
+                                
+                                if displacement >= min_dist:
+                                    if seq == [1, 2]:
+                                        self._people_entry_count += 1
+                                        t["last_counted_time"] = now
+                                        t["crossings"] = []
+                                        database.log_event("people", "entry", f"Track {track_id}", "info")
+                                        photo_path = f"static/events/{int(now)}_people_entry.jpg"
+                                        cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
+                                        database.log_people("entry", self._people_entry_count, self._people_exit_count, photo_path)
+                                    elif seq == [2, 1]:
+                                        self._people_exit_count += 1
+                                        t["last_counted_time"] = now
+                                        t["crossings"] = []
+                                        database.log_event("people", "exit", f"Track {track_id}", "info")
+                                        photo_path = f"static/events/{int(now)}_people_exit.jpg"
+                                        cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
+                                        database.log_people("exit", self._people_entry_count, self._people_exit_count, photo_path)
+                                else:
+                                    t["crossings"] = []  # Reject due to jitter
+                                    
+                    # Stationary check
+                    if now - t["first_seen"] > 10.0:
+                        oldest_pt = t["history"][0]
+                        displacement = math.hypot(cx - oldest_pt[0], cy - oldest_pt[1])
+                        lx1, lx2 = line1[0][0], line2[0][0]
+                        min_x, max_x = min(lx1, lx2) - 50, max(lx1, lx2) + 50
+                        if min_x < cx < max_x and displacement < (x2 - x1):
+                            self._stationary_warning_until = now + 5.0
                 
                 color = (0, 165, 255) # Thin bounding box (orange)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
@@ -634,6 +677,11 @@ class CameraWorker:
         cv2.putText(frame, f"OUT: {self._people_exit_count}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
         inside_count = max(0, self._people_entry_count - self._people_exit_count)
         cv2.putText(frame, f"Currently Inside: {inside_count}", (20, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        
+        if getattr(self, "_stationary_warning_until", 0) > now:
+            warn_text = "WARNING: Lines may be placed in a seating/work area!"
+            cv2.rectangle(frame, (10, height - 60), (width - 10, height - 20), (0, 0, 255), -1)
+            cv2.putText(frame, warn_text, (20, height - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         return frame
 
@@ -1209,10 +1257,10 @@ class CameraWorker:
                     photo_path = f"static/events/{int(time.time())}_box_{event_type}_{track_id}.jpg"
                     cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), out_frame)
                     database.log_bag_box(
-                        self._box_counter.counts['box']['in'],
-                        self._box_counter.counts['box']['out'],
-                        self._box_counter.counts['bag']['in'],
-                        self._box_counter.counts['bag']['out'],
+                        self._box_counter.counts['in'],
+                        self._box_counter.counts['out'],
+                        0, # placeholder for bag in
+                        0, # placeholder for bag out
                         photo_path
                     )
             
