@@ -1234,14 +1234,17 @@ class CameraWorker:
                 float(min(x2, x1 + rx + rw + pad)), float(min(y2, y1 + ry + rh + pad))]
 
     def _process_box(self, frame):
-        # conf=0.25 to ensure the custom model detects the box
-        results = self._custom_box_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=0.25, verbose=False)
+        # conf=0.05 to ensure the custom prototype model detects the box
+        results = self._custom_box_model.track(frame, persist=True, tracker="custom_botsort.yaml", conf=0.05, verbose=False)
         
         with self._status_lock:
             if not self._box_line:
                 height, width = frame.shape[:2]
                 mid_x = width // 2
-                line_pts = [(mid_x / width, 0.0), (mid_x / width, 1.0)]
+                line_pts = [
+                    [(mid_x - 100) / width, 0.0, (mid_x - 100) / width, 1.0],
+                    [(mid_x + 100) / width, 0.0, (mid_x + 100) / width, 1.0]
+                ]
             else:
                 line_pts = list(self._box_line)
             
@@ -1251,16 +1254,17 @@ class CameraWorker:
             for i, event in enumerate(events):
                 event_type = event["type"]
                 track_id = event["track_id"]
-                database.log_event("box", event_type, f"Track ID: {track_id}", "info")
+                cls_name = event.get("class", "unknown")
+                database.log_event("box", event_type, f"Track ID: {track_id} Class: {cls_name}", "info")
                 
                 if i == 0:
                     photo_path = f"static/events/{int(time.time())}_box_{event_type}_{track_id}.jpg"
                     cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), out_frame)
                     database.log_bag_box(
-                        self._box_counter.counts['in'],
-                        self._box_counter.counts['out'],
-                        0, # placeholder for bag in
-                        0, # placeholder for bag out
+                        self._box_counter.counts['cardboard box']['in'],
+                        self._box_counter.counts['cardboard box']['out'],
+                        0,
+                        0,
                         photo_path
                     )
             

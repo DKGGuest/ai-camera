@@ -293,13 +293,13 @@ function drawBoxLineSvg() {
     circle.setAttribute("cx", cx);
     circle.setAttribute("cy", cy);
     circle.setAttribute("r", "6");
-    circle.setAttribute("fill", "#3498db");
+    circle.setAttribute("fill", index < 2 ? "#00ff00" : "#00ffff");
     circle.setAttribute("stroke", "#fff");
     circle.setAttribute("stroke-width", "2");
     roiSvg.appendChild(circle);
   });
   
-  if (boxPoints.length === 2) {
+  if (boxPoints.length >= 2) {
     const p1 = boxPoints[0];
     const p2 = boxPoints[1];
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
@@ -307,7 +307,20 @@ function drawBoxLineSvg() {
     line.setAttribute("y1", p1[1] * rect.height);
     line.setAttribute("x2", p2[0] * rect.width);
     line.setAttribute("y2", p2[1] * rect.height);
-    line.setAttribute("stroke", "#3498db");
+    line.setAttribute("stroke", "#00ff00");
+    line.setAttribute("stroke-width", "3");
+    roiSvg.appendChild(line);
+  }
+
+  if (boxPoints.length === 4) {
+    const p1 = boxPoints[2];
+    const p2 = boxPoints[3];
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", p1[0] * rect.width);
+    line.setAttribute("y1", p1[1] * rect.height);
+    line.setAttribute("x2", p2[0] * rect.width);
+    line.setAttribute("y2", p2[1] * rect.height);
+    line.setAttribute("stroke", "#00ffff");
     line.setAttribute("stroke-width", "3");
     roiSvg.appendChild(line);
   }
@@ -318,7 +331,7 @@ if (roiSvg) {
     const activeBtn = document.querySelector(".mode-btn.active");
     if (!activeBtn || activeBtn.dataset.mode !== "box") return;
 
-    if (boxPoints.length >= 2) return; // Already have a line
+    if (boxPoints.length >= 4) return; // Already have 2 lines
 
     const rect = roiSvg.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
@@ -330,11 +343,15 @@ if (roiSvg) {
     boxPoints.push([relX, relY]);
     drawBoxLineSvg();
     
-    if (boxPoints.length === 2) {
+    if (boxPoints.length === 4) {
+      let chunks = [
+          [boxPoints[0][0], boxPoints[0][1], boxPoints[1][0], boxPoints[1][1]],
+          [boxPoints[2][0], boxPoints[2][1], boxPoints[3][0], boxPoints[3][1]]
+      ];
       const res = await fetch("/api/set_box_line", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ points: boxPoints }),
+        body: JSON.stringify({ points: chunks }),
       });
       const data = await res.json();
       if (!data.ok) {
@@ -639,8 +656,8 @@ async function pollModelData() {
                 </tr>`;
             }).join("");
         } else if (currentMode === "box") {
-            title = "Bags & Boxes Counter";
-            headers = "<th>Serial No.</th><th>Boxes IN</th><th>Boxes OUT</th><th>Photo</th><th>Date</th><th>Time</th>";
+            title = "Cardboard Box Loading Tracker";
+            headers = "<th>Serial No.</th><th>Boxes Loading</th><th>Boxes Unloading</th><th>Photo</th><th>Date</th><th>Time</th>";
             rows = data.map(r => {
                 const dt = new Date(r.ts * 1000);
                 const dateStr = dt.toISOString().split('T')[0];

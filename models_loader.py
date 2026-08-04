@@ -3,7 +3,7 @@ import urllib.request
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
+from ultralytics import YOLO, YOLOWorld
 
 import config
 
@@ -21,11 +21,14 @@ def load_yolo_model():
 
 
 def load_custom_box_model():
-    print(f"Loading Custom YOLO model for boxes ({config.CUSTOM_BOX_MODEL_PATH})...")
-    if os.path.exists(config.CUSTOM_BOX_MODEL_PATH):
-        return YOLO(config.CUSTOM_BOX_MODEL_PATH)
+    world_path = os.path.join(config.BASE_DIR, "yolov8s-world.pt")
+    print(f"Loading YOLO-World model for boxes ({world_path})...")
+    if os.path.exists(world_path):
+        model = YOLOWorld(world_path)
+        model.set_classes(["cardboard box", "sugar_sack", "box"])
+        return model
     else:
-        print("Warning: Custom box model not found. Falling back to default YOLO model.")
+        print("Warning: YOLO-World model not found. Falling back to default YOLO model.")
         return YOLO(config.YOLO_MODEL_PATH)
 
 

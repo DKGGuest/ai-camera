@@ -4,6 +4,7 @@ import time
 import sys
 import os
 import argparse
+import math
 
 # Add project root to sys.path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))

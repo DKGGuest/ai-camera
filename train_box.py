@@ -10,7 +10,7 @@ def train_custom_model():
     # Make sure 'dataset/data.yaml' is the file you exported from your labeling tool (Roboflow/MakeSense).
     results = model.train(
         data='box_dataset/dataset.yaml', 
-        epochs=10,             # Set to 10 for quicker turnaround in this session
+        epochs=20,             # Set to 20 to improve accuracy with the new images
         imgsz=640,             
         batch=8,               
         name='omada_box_model' 

@@ -16,8 +16,20 @@ settings.json
 static/events/*
 !static/events/.gitkeep
 
-# Large AI Model Weights (Should be downloaded at runtime)
-*.pt
+# Training Data and Logs (DO NOT UPLOAD)
+box_dataset/
+datasets/
+imagesbox/
+runs/
+__pycache__/
+
+# Media and Outputs
+*.mp4
+outputs/
+
+# Auto-downloaded/Generated AI Models
+*.onnx
+best_openvino_model/
 
 # OS generated files
 .DS_Store
