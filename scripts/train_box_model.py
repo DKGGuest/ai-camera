@@ -102,16 +102,21 @@ names:
 
 def train_model():
     print("Starting training...")
-    # Load base model
-    model = YOLO("yolov8n.pt") # Use a small model as base
+    # Load a stronger base model for better accuracy
+    model = YOLO("yolov8n.pt") # Use the faster nano model
     
-    # Train with more epochs and scale augmentation to learn size variance
+    # Train with more epochs and heavy augmentation to learn all angles and reduce flickering
     results = model.train(
         data=YAML_FILE,
-        epochs=30,
-        imgsz=640,
+        epochs=20, # Reduced to 20 for speed
+        imgsz=320, # Reduced image size for 4x speedup
         batch=4,
-        scale=0.5,
+        scale=0.7,
+        degrees=45.0,
+        perspective=0.0005,
+        flipud=0.5,
+        fliplr=0.5,
+        mosaic=1.0,
         project=os.path.join(config.BASE_DIR, "runs"),
         name="cardboard_box_finetune"
     )

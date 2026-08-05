@@ -67,13 +67,23 @@ class BoxCounter:
                 if cls_name not in self.target_classes:
                     continue
 
+                if conf <= 0.01:
+                    continue
+
+                if conf <= 0.30:
+                    track_id = None
+                    display_name = "untracked box"
+                    color = (0, 165, 255)  # Orange for untracked
+                else:
+                    display_name = "cardboard box"
+                    color = (0, 0, 255)  # Red for high confidence cardboard boxes
+
                 x1, y1, x2, y2 = map(int, box)
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 
                 # Draw the bounding box and label regardless of whether it's tracked or not
                 id_text = f"#{track_id}" if track_id is not None else "#UNTRACKED"
-                label = f"{id_text} {cls_name} {conf:.2f}"
-                color = (0, 0, 255) if track_id is not None else (0, 165, 255) # Orange for untracked
+                label = f"{id_text} {display_name} {conf:.2f}"
                 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.circle(frame, (cx, cy), 5, color, -1)

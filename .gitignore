@@ -31,6 +31,11 @@ outputs/
 *.onnx
 best_openvino_model/
 
+# Large Model Weight Files (exceed GitHub 100MB limit)
+*.pt
+*.pth
+weights/
+
 # OS generated files
 .DS_Store
 Thumbs.db
