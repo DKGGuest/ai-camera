@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import time
+import os
+import database
 
 from src.core.video import initialize_video_capture, initialize_video_writer
 from src.core.models import load_yolo_model
@@ -29,6 +31,12 @@ def run(video_source='0', output_path='adaptive_output.mp4'):
     LOW_RES_WIDTH = 320
     LOW_RES_HEIGHT = int(320 * (height / width)) if width > 0 else 240
     
+    # Database Tracking
+    current_state = 'HIGH' # Assume it starts in high quality to search for humans
+    state_start_time = time.time()
+    events_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'static', 'events')
+    os.makedirs(events_dir, exist_ok=True)
+
     while True:
         loop_start = time.time()
         
@@ -54,6 +62,9 @@ def run(video_source='0', output_path='adaptive_output.mp4'):
         elif current_time - last_human_seen_time > COOLDOWN_SECONDS:
             active_mode = False
             
+        # Determine new state
+        new_state = 'HIGH' if active_mode else 'LOW'
+        
         output_frame = frame.copy()
         
         if not active_mode:
@@ -80,6 +91,23 @@ def run(video_source='0', output_path='adaptive_output.mp4'):
         cv2.putText(output_frame, status_text, (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.9, status_color, 2)
         cv2.putText(output_frame, f"Simulated Data Usage: {bitrate_text}", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
+        # Check if state changed to log it
+        if new_state != current_state:
+            duration_seconds = current_time - state_start_time
+            formatted_duration = time.strftime('%H:%M:%S', time.gmtime(duration_seconds))
+            
+            img_filename = f"{int(current_time)}_stream_{current_state.lower()}.jpg"
+            img_path_full = os.path.join(events_dir, img_filename)
+            cv2.imwrite(img_path_full, output_frame)
+            
+            relative_path = f"/static/events/{img_filename}"
+            database.log_adaptive(current_state, formatted_duration, relative_path)
+            print(f"Stream switched to {new_state}. Logged {current_state} state duration: {formatted_duration}")
+            
+            # Reset state tracker
+            current_state = new_state
+            state_start_time = current_time
+
         if is_image:
             image_out_path = final_output_path.replace('.mp4', '.jpg') if final_output_path else 'adaptive_output.jpg'
             cv2.imwrite(image_out_path, output_frame)

@@ -3,6 +3,7 @@ import time
 from ultralytics import YOLO
 import sys
 import os
+import database
 
 # Add project root to sys.path so we can import 'src' modules directly
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -70,6 +71,11 @@ fuse_score: True
     
     # To avoid spamming the server, we only send an update for an ID once every 2 seconds
     last_broadcast_time = {}
+
+    events_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'static', 'events')
+    os.makedirs(events_dir, exist_ok=True)
+    last_entry_count = 0
+    last_exit_count = 0
 
     print(f"Processing video '{video_source}'...")
     
@@ -183,6 +189,20 @@ fuse_score: True
         cv2.rectangle(frame, (0, 0), (300, 80), (0, 0, 0), -1)
         cv2.putText(frame, f"ENTRIES: {entry_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
         cv2.putText(frame, f"EXITS: {exit_count}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+
+        if entry_count != last_entry_count or exit_count != last_exit_count:
+            direction = 'IN' if entry_count != last_entry_count else 'OUT'
+            current_time = time.time()
+            img_filename = f"{int(current_time)}_{direction.lower()}_{entry_count}_{exit_count}.jpg"
+            img_path_full = os.path.join(events_dir, img_filename)
+            cv2.imwrite(img_path_full, frame)
+            
+            relative_path = f"/static/events/{img_filename}"
+            database.log_people(direction, entry_count, exit_count, relative_path)
+            print(f"Logged person {direction} - Total In: {entry_count}, Total Out: {exit_count}")
+            
+            last_entry_count = entry_count
+            last_exit_count = exit_count
 
         if out is not None:
             out.write(frame)

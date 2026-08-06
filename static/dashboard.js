@@ -597,7 +597,7 @@ async function pollModelData() {
                 return `<tr>
                     <td>${r.id}</td>
                     <td>${r.state.toUpperCase()}</td>
-                    <td>${r.duration.toFixed(1)}</td>
+                    <td>${r.duration}</td>
                     <td>${imgHtml}</td>
                     <td>${dateStr}</td>
                     <td>${timeStr}</td>
@@ -665,8 +665,8 @@ async function pollModelData() {
                 const imgHtml = r.photo_path ? `<img src="/${r.photo_path}" style="width: 80px; height: 45px; object-fit: cover; border-radius: 4px; border: 1px solid #444;">` : 'N/A';
                 return `<tr>
                     <td>${r.id}</td>
-                    <td><strong style="color: #2ecc71;">${r.boxes_in}</strong></td>
-                    <td><strong style="color: #e74c3c;">${r.boxes_out}</strong></td>
+                    <td><strong style="color: #2ecc71;">${r.loaded_count}</strong></td>
+                    <td><strong style="color: #e74c3c;">${r.unloaded_count}</strong></td>
                     <td>${imgHtml}</td>
                     <td>${dateStr}</td>
                     <td>${timeStr}</td>

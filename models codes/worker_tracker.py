@@ -30,6 +30,7 @@ import urllib.request
 import cv2
 import numpy as np
 from ultralytics import YOLO
+import database
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -272,6 +273,9 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
     last_phone_boxes = []
     last_tick = None
     frame_count = 0
+    last_db_log_time = time.time()
+    events_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'static', 'events')
+    os.makedirs(events_dir, exist_ok=True)
 
     print("[WorkerTracker] Starting capture loop. Press 'q' to exit.")
 
@@ -656,6 +660,25 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
                 )
                 (sw, _), _ = cv2.getTextSize(worker_summary, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
                 hud_x += sw + 20
+
+            # --- Database Logging every 10 seconds ---
+            if not is_image and (now - last_db_log_time >= 10.0):
+                last_db_log_time = now
+                img_filename = f"{int(now)}_worker_tracker.jpg"
+                img_path_full = os.path.join(events_dir, img_filename)
+                cv2.imwrite(img_path_full, frame)
+                relative_path = f"/static/events/{img_filename}"
+                
+                logged_count = 0
+                for tid, s in worker_states.items():
+                    if s.get("lost_frames", 0) > 0:
+                        continue
+                    w_sec = s.get("working_s", 0.0)
+                    nw_sec = s.get("not_working_s", 0.0)
+                    database.log_worker(f"Worker {tid}", w_sec, nw_sec, relative_path)
+                    logged_count += 1
+                if logged_count > 0:
+                    print(f"[WorkerTracker] Logged {logged_count} workers to DB.")
 
             # ---- Write output / display ----
             if out is not None:

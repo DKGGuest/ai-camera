@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 import time
+import sys
+import os
+import database
 
 from src.core.video import initialize_video_capture, initialize_video_writer
 from src.core.models import load_yolo_model
@@ -32,6 +35,9 @@ def run(video_source='0', output_path='queue_output.mp4'):
         
     print(f"Processing '{video_source}'...")
     last_alarm_time = 0
+    last_people_in_line = 0
+    events_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'static', 'events')
+    os.makedirs(events_dir, exist_ok=True)
     
     while True:
         loop_start = time.time()
@@ -82,6 +88,19 @@ def run(video_source='0', output_path='queue_output.mp4'):
             if time.time() - last_alarm_time > 2.0:
                 import os as _os; _os.system("afplay /System/Library/Sounds/Ping.aiff &")
                 last_alarm_time = time.time()
+                
+        if people_in_line != last_people_in_line:
+            current_time = time.time()
+            img_filename = f"{int(current_time)}_queue_{people_in_line}.jpg"
+            img_path_full = os.path.join(events_dir, img_filename)
+            cv2.imwrite(img_path_full, frame)
+            
+            relative_path = f"/static/events/{img_filename}"
+            person_count_str = f"Line 1: {people_in_line}"
+            database.log_queue(person_count_str, relative_path)
+            print(f"Queue count changed. Logged: {person_count_str}")
+            
+        last_people_in_line = people_in_line
         
         display_frame = frame
         if width > 1000:

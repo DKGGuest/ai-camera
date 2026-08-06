@@ -1,8 +1,11 @@
 import cv2
+import time
+import os
 
 from src.core.video import initialize_video_capture
 from src.core.models import load_face_models, load_known_faces, recognizer_match
 from src.utils.drawing import draw_banner
+import database
 
 def run(video_source='0', known_dir='known_workers'):
     print("Loading High-Accuracy Access Control System...")
@@ -20,6 +23,14 @@ def run(video_source='0', known_dir='known_workers'):
         return
 
     print("System Ready. Waiting for a face...")
+
+    # Dictionary to keep track of last logged time for each person to prevent DB spam
+    last_logged_time = {}
+    LOG_COOLDOWN = 5.0  # seconds
+
+    # Ensure static/events directory exists
+    events_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'static', 'events')
+    os.makedirs(events_dir, exist_ok=True)
 
     while True:
         if is_image:
@@ -57,6 +68,10 @@ def run(video_source='0', known_dir='known_workers'):
         if largest_face_data is not None:
             x, y, fw, fh = largest_box
             
+            # Always draw a rectangle (red by default, green if recognized)
+            box_color = (0, 0, 255)
+            cv2.rectangle(frame, (x, y), (x+fw, y+fh), box_color, 3)
+            
             try:
                 aligned_face = recognizer.alignCrop(frame, largest_face_data)
                 feature = recognizer.feature(aligned_face)
@@ -71,10 +86,14 @@ def run(video_source='0', known_dir='known_workers'):
                         if score > similarity_threshold:
                             best_match = known_key.split('_')[0]
                             
+                db_status = 'DENIED'
                 if best_match != "Unknown":
                     status_text = f"ACCESS GRANTED: {best_match.upper()}"
                     status_color = (0, 200, 0)
                     box_color = (0, 255, 0)
+                    db_status = 'GRANTED'
+                    # Redraw rectangle green for recognized face
+                    cv2.rectangle(frame, (x, y), (x+fw, y+fh), box_color, 3)
                 else:
                     status_text = "ACCESS DENIED"
                     status_color = (0, 0, 200)
@@ -82,6 +101,27 @@ def run(video_source='0', known_dir='known_workers'):
                     
                 cv2.rectangle(frame, (x, y), (x+fw, y+fh), box_color, 3)
                 
+                # Check cooldown before logging
+                current_time = time.time()
+                last_time = last_logged_time.get(best_match, 0)
+                
+                if current_time - last_time > LOG_COOLDOWN:
+                    last_logged_time[best_match] = current_time
+                    
+                    # Add status text before saving image
+                    log_frame = frame.copy()
+                    draw_banner(log_frame, status_text, status_color)
+                    
+                    # Save image
+                    img_filename = f"{int(current_time)}_{best_match}.jpg"
+                    img_path_full = os.path.join(events_dir, img_filename)
+                    cv2.imwrite(img_path_full, log_frame)
+                    
+                    # Log to database with relative path for web
+                    relative_path = f"/static/events/{img_filename}"
+                    database.log_access(best_match, db_status, relative_path)
+                    print(f"Logged {db_status} for {best_match}")
+
             except Exception as e:
                 pass
                 

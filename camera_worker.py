@@ -392,6 +392,11 @@ class CameraWorker:
 
         if largest_face is not None:
             x, y, fw, fh = largest_box
+            
+            # Always draw a rectangle around the detected face (red by default)
+            box_color = (0, 0, 255)
+            cv2.rectangle(frame, (x, y), (x + fw, y + fh), box_color, 3)
+            
             try:
                 aligned = self._face_recognizer.alignCrop(frame, largest_face)
                 feature = self._face_recognizer.feature(aligned)
@@ -408,25 +413,24 @@ class CameraWorker:
                 if best_match != "Unknown":
                     status_text = f"ACCESS GRANTED: {best_match.upper()}"
                     status_color, box_color = (0, 200, 0), (0, 255, 0)
+                    # Redraw rectangle with green color
+                    cv2.rectangle(frame, (x, y), (x + fw, y + fh), box_color, 3)
                     last = self._last_access_log.get(best_match, 0)
                     if now - last > 5.0:
-                        database.log_event("access", "entry", best_match, "granted")
                         photo_path = f"static/events/{int(now)}_{best_match}.jpg"
                         cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
                         database.log_access(best_match, "granted", photo_path)
                         self._last_access_log[best_match] = now
                 else:
                     status_text = "ACCESS DENIED"
-                    status_color, box_color = (0, 0, 200), (0, 0, 255)
+                    status_color = (0, 0, 200)
                     last = self._last_access_log.get("Unknown", 0)
                     if now - last > 5.0:
-                        database.log_event("access", "entry", "Unknown person", "denied")
                         photo_path = f"static/events/{int(now)}_unknown.jpg"
                         cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
                         database.log_access("Unknown person", "denied", photo_path)
                         self._last_access_log["Unknown"] = now
 
-                cv2.rectangle(frame, (x, y), (x + fw, y + fh), box_color, 3)
             except Exception:
                 pass
 
@@ -1255,16 +1259,13 @@ class CameraWorker:
                 event_type = event["type"]
                 track_id = event["track_id"]
                 cls_name = event.get("class", "unknown")
-                database.log_event("box", event_type, f"Track ID: {track_id} Class: {cls_name}", "info")
                 
                 if i == 0:
                     photo_path = f"static/events/{int(time.time())}_box_{event_type}_{track_id}.jpg"
                     cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), out_frame)
-                    database.log_bag_box(
+                    database.log_box(
                         self._box_counter.counts['cardboard box']['in'],
                         self._box_counter.counts['cardboard box']['out'],
-                        0,
-                        0,
                         photo_path
                     )
             

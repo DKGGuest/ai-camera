@@ -2,6 +2,8 @@ import cv2
 import time
 import math
 from collections import defaultdict
+import os
+import database
 
 class BoxCounter:
     def __init__(self):
@@ -181,5 +183,20 @@ class BoxCounter:
             warn_text = "WARNING: Lines may be placed in a seating/work area!"
             cv2.rectangle(frame, (10, h - 60), (w - 10, h - 20), (0, 0, 255), -1)
             cv2.putText(frame, warn_text, (20, h - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+        if events:
+            events_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'static', 'events')
+            os.makedirs(events_dir, exist_ok=True)
+            current_time = time.time()
+            loaded = self.counts['cardboard box']['in']
+            unloaded = self.counts['cardboard box']['out']
+            
+            img_filename = f"{int(current_time)}_box_in{loaded}_out{unloaded}.jpg"
+            img_path_full = os.path.join(events_dir, img_filename)
+            cv2.imwrite(img_path_full, frame)
+            
+            relative_path = f"/static/events/{img_filename}"
+            database.log_box(loaded, unloaded, relative_path)
+            print(f"Box count changed. Logged Loaded: {loaded}, Unloaded: {unloaded}")
             
         return frame, events
