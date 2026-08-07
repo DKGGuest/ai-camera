@@ -116,17 +116,20 @@ def train_model():
     
     results = model.train(
         data=YAML_FILE,
-        epochs=10,
-        imgsz=640,        # Higher resolution for better angle detection
+        epochs=50,        # Scaled back to 50 epochs as requested
+        patience=15,      # Keep early stopping patience high for tricky angles
+        imgsz=640,
         batch=4,
-        scale=0.7,
-        degrees=90.0,     # Full rotation augmentation for all angles
-        perspective=0.001,
+        scale=0.8,
+        degrees=180.0,    # 180 degrees rotation for all angles
+        translate=0.2,    # Translation to handle moving boxes
+        shear=15.0,       # Shear for perspective changes
+        perspective=0.002,
         flipud=0.5,
         fliplr=0.5,
         mosaic=1.0,
-        mixup=0.3,        # Mix images together for robustness
-        copy_paste=0.2,   # Copy-paste augmentation
+        mixup=0.5,        # Slightly higher mixup to handle complex moving backgrounds
+        copy_paste=0.3,
         project=os.path.join(config.BASE_DIR, "runs"),
         name="cardboard_box_retrain"
     )
