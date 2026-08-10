@@ -56,7 +56,7 @@ class ItemCounterGUI:
         self.skip_frames = skip_frames  # 0 = run detection every frame, 1 = every 2nd frame, etc.
 
         # State
-        self.counts = {cls: {"in": 0, "out": 0} for cls in self.target_classes}
+        self.counts = {cls: {"loaded": 0, "unloaded": 0} for cls in self.target_classes}
         self.status = "Status: Initializing..."
         self.is_running = True
 
@@ -125,7 +125,7 @@ class ItemCounterGUI:
 
                 if run_detection:
                     results = self.model.track(
-                        frame, persist=True, verbose=False, conf=0.35,
+                        frame, persist=True, verbose=False, conf=0.20,
                         tracker=self.tracker_yaml, imgsz=self.imgsz
                     )
                     self._last_boxes = []
@@ -200,11 +200,11 @@ class ItemCounterGUI:
 
                                             if displacement >= min_dist:
                                                 if seq == [1, 2]:
-                                                    self.counts[cls_name]["in"] += 1
+                                                    self.counts[cls_name]["loaded"] += 1
                                                     t["last_counted_time"] = now
                                                     t["crossings"] = []
                                                 elif seq == [2, 1]:
-                                                    self.counts[cls_name]["out"] += 1
+                                                    self.counts[cls_name]["unloaded"] += 1
                                                     t["last_counted_time"] = now
                                                     t["crossings"] = []
                                             else:
@@ -235,7 +235,7 @@ class ItemCounterGUI:
 
                 y_offset = 60
                 for cls in self.target_classes:
-                    count_text = f"{cls} in: {self.counts[cls]['in']} | out: {self.counts[cls]['out']}"
+                    count_text = f"{cls} loaded: {self.counts[cls]['loaded']} | unloaded: {self.counts[cls]['unloaded']}"
                     (tw, th), _ = cv2.getTextSize(count_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
                     cv2.rectangle(frame, (10, y_offset - th - 10), (10 + tw + 10, y_offset + 5), (0, 0, 0), -1)
                     cv2.putText(frame, count_text, (15, y_offset - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
@@ -253,8 +253,8 @@ class ItemCounterGUI:
                     self.is_running = False
                 elif key == ord('r'):
                     for cls in self.target_classes:
-                        self.counts[cls]["in"] = 0
-                        self.counts[cls]["out"] = 0
+                        self.counts[cls]["loaded"] = 0
+                        self.counts[cls]["unloaded"] = 0
                     self.status = "Status: Counters Reset"
 
             except Exception as e:

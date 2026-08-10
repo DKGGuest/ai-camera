@@ -82,7 +82,13 @@ def load_models():
         score_threshold=0.5, nms_threshold=0.3, top_k=5000
     )
 
-    return yolo, face_detector
+    worker_classifier_path = os.path.join(PROJECT_ROOT, "worker_classifier.pt")
+    worker_classifier = None
+    if os.path.exists(worker_classifier_path):
+        print(f"[WorkerTracker] Loading Worker Classifier ({worker_classifier_path})...")
+        worker_classifier = YOLO(worker_classifier_path)
+
+    return yolo, face_detector, worker_classifier
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +251,7 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
     """Main worker tracking loop."""
 
     # Load models
-    yolo, face_detector = load_models()
+    yolo, face_detector, worker_classifier = load_models()
 
     # Open video
     frame, cap, width, height, fps, is_image = initialize_video(video_source)
@@ -314,7 +320,7 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
                         if cls_name == "person" and c >= 0.20:
                             person_candidates.append([x1, y1, x2, y2])
                             person_scores.append(c)
-                        elif cls_name in ("laptop", "tv", "mouse", "keyboard") and c >= 0.20:
+                        elif cls_name in ("laptop", "tv", "mouse", "keyboard") and c >= 0.10:
                             laptop_candidates.append([x1, y1, x2, y2])
                             laptop_scores.append(c)
                             laptop_names.append(cls_name)
@@ -423,9 +429,20 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
                                 has_laptop = True
                                 break
 
-                    # WORKING = (near laptop OR looking at screen) and no phone
-                    # This prevents false negatives for people whose faces aren't perfectly detected or who are in profile.
-                    raw_working = (has_laptop or looking_at_screen) and not phone_near
+                    # Custom Classifier
+                    if worker_classifier is not None and roi.size > 0:
+                        try:
+                            cls_res = worker_classifier(roi, verbose=False)[0]
+                            top1_name = cls_res.names[cls_res.probs.top1]
+                            # Combine AI prediction with the strong heuristic indicators
+                            raw_working = ((top1_name == 'working') or has_laptop or looking_at_screen) and not phone_near
+                        except Exception:
+                            raw_working = (has_laptop or looking_at_screen) and not phone_near
+                    else:
+                        # Fallback to heuristic
+                        # WORKING = (near laptop OR looking at screen) and no phone
+                        # This prevents false negatives for people whose faces aren't perfectly detected or who are in profile.
+                        raw_working = (has_laptop or looking_at_screen) and not phone_near
 
                     # Update or create state
                     st = worker_states.get(tid)
