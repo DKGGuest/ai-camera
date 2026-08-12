@@ -24,15 +24,15 @@ def run(video_source='0', output_path='output_counted_video.mp4', frame_callback
     # Load the specified YOLO model (default is nano, but can be a custom trained model)
     model = load_yolo_model(model_path)
     
-    # Create custom tracker YAML for BoT-SORT without ReID
+    # Create custom tracker YAML for ByteTrack
     tracker_yaml_path = "custom_botsort.yaml"
     with open(tracker_yaml_path, "w") as f:
-        f.write(f"""tracker_type: botsort
-track_high_thresh: 0.5
+        f.write(f"""tracker_type: bytetrack
+track_high_thresh: 0.2
 track_low_thresh: 0.1
 new_track_thresh: 0.6
 track_buffer: {track_buffer}
-match_thresh: 0.8
+match_thresh: 0.9
 gmc_method: sparseOptFlow
 proximity_thresh: 0.5
 appearance_thresh: 0.25
@@ -81,8 +81,8 @@ fuse_score: True
             
         frame = frame_read
         
-        # Use YOLO's built-in tracker with custom BoT-SORT config (ReID enabled)
-        results = model.track(frame, persist=True, verbose=False, conf=0.35, tracker=tracker_yaml_path)
+        # Use YOLO's built-in tracker with custom ByteTrack config
+        results = model.track(frame, persist=True, verbose=False, conf=0.20, tracker=tracker_yaml_path)
         
         # Draw the counting line + buffer boundaries
         cv2.line(frame, (0, line_y), (width, line_y), (255, 0, 0), 2)

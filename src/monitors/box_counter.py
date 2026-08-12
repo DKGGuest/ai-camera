@@ -9,6 +9,8 @@ class BoxCounter:
         self.tracks = {}
         self.current_day = time.localtime().tm_yday
         self.target_classes = ["cardboard box"]
+        self.id_mapping = {}
+        self.track_history = {}
 
 
         
@@ -62,7 +64,7 @@ class BoxCounter:
             else:
                 ids = [None] * len(boxes)
             
-            for box, track_id, cls_id, conf in zip(boxes, ids, classes, confs):
+            for box, raw_track_id, cls_id, conf in zip(boxes, ids, classes, confs):
                 cls_name = names[cls_id]
                 if cls_name not in self.target_classes:
                     continue
@@ -70,16 +72,52 @@ class BoxCounter:
                 if conf <= 0.01:
                     continue
 
+                x1, y1, x2, y2 = map(int, box)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+                # --- FALLBACK BOX RE-LINKING ---
+                if raw_track_id is not None:
+                    if raw_track_id not in self.id_mapping and raw_track_id not in self.track_history:
+                        best_old_id = None
+                        best_dist = 400.0  # Allow large jumps for fast movement / rotations
+                        
+                        for old_id, info in self.track_history.items():
+                            time_since_lost = now - info['time']
+                            if 0 < time_since_lost < 2.0:
+                                dist = math.hypot(cx - info['cx'], cy - info['cy'])
+                                if dist < best_dist:
+                                    best_dist = dist
+                                    best_old_id = old_id
+                                    
+                        if best_old_id is not None:
+                            self.id_mapping[raw_track_id] = best_old_id
+                    
+                    track_id = self.id_mapping.get(raw_track_id, raw_track_id)
+                else:
+                    # Centroid fallback for completely untracked boxes (when tracker fails to assign any ID)
+                    best_old_id = None
+                    best_dist = 150.0
+                    for old_id, info in self.track_history.items():
+                        time_since_lost = now - info['time']
+                        if 0 < time_since_lost < 1.0:
+                            dist = math.hypot(cx - info['cx'], cy - info['cy'])
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_old_id = old_id
+                    if best_old_id is not None:
+                        track_id = best_old_id
+                    else:
+                        # Generate a temporary negative ID to not conflict with tracker IDs
+                        track_id = -int(time.time() * 1000) % 1000000
+
+                self.track_history[track_id] = {'time': now, 'cx': cx, 'cy': cy}
+
                 if conf <= 0.30:
-                    track_id = None
                     display_name = "untracked box"
                     color = (0, 165, 255)  # Orange for untracked
                 else:
                     display_name = "cardboard box"
                     color = (0, 0, 255)  # Red for high confidence cardboard boxes
-
-                x1, y1, x2, y2 = map(int, box)
-                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 
                 # Draw the bounding box and label regardless of whether it's tracked or not
                 id_text = f"#{track_id}" if track_id is not None else "#UNTRACKED"

@@ -32,6 +32,16 @@ def load_custom_box_model():
         return YOLO(config.YOLO_MODEL_PATH)
 
 
+def load_worker_classifier():
+    classifier_path = os.path.join(config.BASE_DIR, "worker_classifier.pt")
+    print(f"Loading custom worker classifier ({classifier_path})...")
+    if os.path.exists(classifier_path):
+        return YOLO(classifier_path)
+    else:
+        print("Warning: Custom worker classifier not found.")
+        return None
+
+
 def load_face_models():
     models_dir = os.path.join(config.BASE_DIR, "models")
     os.makedirs(models_dir, exist_ok=True)

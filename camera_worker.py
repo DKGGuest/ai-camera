@@ -72,6 +72,40 @@ def nms_boxes(boxes, scores, iou_threshold=0.4):
         
     return keep
 
+def estimate_head_pose(landmarks, fy, fh, py1, py2, camera_angle="elevated"):
+    right_eye, left_eye = landmarks[0], landmarks[1]
+    nose = landmarks[2]
+    right_mouth, left_mouth = landmarks[3], landmarks[4]
+
+    eye_dist = float(np.linalg.norm(left_eye - right_eye))
+    if eye_dist < 1.0:
+        return 0.0, 0.0, 0.0, 0.5
+
+    eye_cx = (right_eye[0] + left_eye[0]) / 2.0
+    eye_cy = (right_eye[1] + left_eye[1]) / 2.0
+    mouth_cy = (right_mouth[1] + left_mouth[1]) / 2.0
+
+    yaw_ratio = (nose[0] - eye_cx) / eye_dist
+    pitch_ratio = (mouth_cy - eye_cy) / eye_dist
+    
+    face_center_y = fy + fh / 2.0
+    person_h = py2 - py1
+    face_rel_y = face_center_y / person_h if person_h > 0 else 0.5
+
+    if camera_angle == "elevated":
+        yaw_max, pitch_min, face_y_max = 0.8, -0.5, 0.85
+    elif camera_angle == "side":
+        yaw_max, pitch_min, face_y_max = 1.2, -0.2, 0.75
+    else:
+        yaw_max, pitch_min, face_y_max = 0.5, -0.1, 0.65
+
+    score = 1.0
+    if abs(yaw_ratio) > yaw_max: score -= 0.5
+    if pitch_ratio < pitch_min: score -= 0.8
+    if face_rel_y > face_y_max: score -= 0.5
+
+    return max(0.0, min(1.0, score)), yaw_ratio, pitch_ratio, face_rel_y
+
 
 class CameraWorker:
     """
@@ -121,6 +155,8 @@ class CameraWorker:
 
         # People-counter state
         self._people_tracks = {}
+        self._people_id_mapping = {}
+        self._people_track_history = {}
         self._people_entry_count = 0
         self._people_exit_count = 0
         self._last_people_photo = 0.0
@@ -208,6 +244,8 @@ class CameraWorker:
             self._people_entry_count = 0
             self._people_exit_count = 0
             self._people_tracks.clear()
+            self._people_id_mapping.clear()
+            self._people_track_history.clear()
 
     def reload_known_faces(self):
         self._ensure_models_loaded()
@@ -246,6 +284,8 @@ class CameraWorker:
             self._yolo = models_loader.load_yolo_model()
         if not hasattr(self, '_custom_box_model') or self._custom_box_model is None:
             self._custom_box_model = models_loader.load_custom_box_model()
+        if not hasattr(self, '_worker_classifier') or self._worker_classifier is None:
+            self._worker_classifier = models_loader.load_worker_classifier()
         self._box_counter = BoxCounter()
         self._face_detector, self._face_recognizer = models_loader.load_face_models()
         self._known_embeddings = models_loader.load_known_faces(
@@ -556,7 +596,7 @@ class CameraWorker:
                 (int(pts[1][2] * width), int(pts[1][3] * height))
             ]
 
-        results = self._yolo.track(frame, persist=True, classes=[PERSON_CLASS], verbose=False, conf=0.35, tracker="custom_botsort.yaml")
+        results = self._yolo.track(frame, persist=True, classes=[PERSON_CLASS], verbose=False, conf=0.20, tracker="custom_botsort.yaml")
         
         def ccw(A, B, C):
             return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
@@ -576,9 +616,28 @@ class CameraWorker:
             boxes = results[0].boxes.xyxy.cpu()
             ids = results[0].boxes.id.int().cpu().tolist()
             
-            for box, track_id in zip(boxes, ids):
+            for box, raw_track_id in zip(boxes, ids):
                 x1, y1, x2, y2 = map(int, box)
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                
+                # --- FALLBACK RE-LINKING ---
+                if raw_track_id not in self._people_id_mapping and raw_track_id not in self._people_track_history:
+                    best_old_id = None
+                    best_dist = 500.0  # Allow large jumps for fast movement
+                    
+                    for old_id, info in self._people_track_history.items():
+                        time_since_lost = now - info['time']
+                        if 0 < time_since_lost < 1.5:
+                            dist = math.hypot(cx - info['cx'], cy - info['cy'])
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_old_id = old_id
+                                
+                    if best_old_id is not None:
+                        self._people_id_mapping[raw_track_id] = best_old_id
+                
+                track_id = self._people_id_mapping.get(raw_track_id, raw_track_id)
+                self._people_track_history[track_id] = {'time': now, 'cx': cx, 'cy': cy}
                 
                 if track_id not in self._people_tracks:
                     self._people_tracks[track_id] = {
@@ -607,8 +666,13 @@ class CameraWorker:
                             crossed_lines.append(2)
                             
                         if len(crossed_lines) == 2:
-                            dist1 = abs(prev_pt[0] - line1[0][0])
-                            dist2 = abs(prev_pt[0] - line2[0][0])
+                            mid1_x = (line1[0][0] + line1[1][0]) / 2
+                            mid1_y = (line1[0][1] + line1[1][1]) / 2
+                            mid2_x = (line2[0][0] + line2[1][0]) / 2
+                            mid2_y = (line2[0][1] + line2[1][1]) / 2
+                            
+                            dist1 = math.hypot(prev_pt[0] - mid1_x, prev_pt[1] - mid1_y)
+                            dist2 = math.hypot(prev_pt[0] - mid2_x, prev_pt[1] - mid2_y)
                             if dist1 < dist2:
                                 crossed_lines = [1, 2]
                             else:
@@ -626,7 +690,7 @@ class CameraWorker:
                             if seq == [1, 2] or seq == [2, 1]:
                                 oldest_pt = t["history"][0]
                                 displacement = math.hypot(cx - oldest_pt[0], cy - oldest_pt[1])
-                                min_dist = 0.3 * (x2 - x1)
+                                min_dist = 0.2 * (x2 - x1)
                                 
                                 if displacement >= min_dist:
                                     if seq == [1, 2]:
@@ -821,7 +885,7 @@ class CameraWorker:
 
                 # --- YuNet Face Detection + Head Pose Estimation ---
                 face_box_abs = None
-                looking_at_screen = False
+                head_score, yaw_ratio, pitch_ratio, face_rel_y = 0.0, 0.0, 0.0, 0.5
                 if roi.size > 0:
                     try:
                         rh, rw = roi.shape[:2]
@@ -829,42 +893,23 @@ class CameraWorker:
                             self._worker_face_det.setInputSize((rw, rh))
                             _, detected_faces = self._worker_face_det.detect(roi)
                             if detected_faces is not None and len(detected_faces) > 0:
-                                # Pick the largest face in ROI
                                 best_face = max(detected_faces, key=lambda f: f[2] * f[3])
-                                fx, fy, fw, fh = int(best_face[0]), int(best_face[1]), int(best_face[2]), int(best_face[3])
-                                face_box_abs = [px1 + fx, py1 + fy, px1 + fx + fw, py1 + fy + fh]
-
-                                # Extract 5 landmarks: right_eye, left_eye, nose, right_mouth, left_mouth
-                                lm = best_face[4:14].reshape(5, 2)
-                                right_eye, left_eye = lm[0], lm[1]
-                                nose = lm[2]
-                                right_mouth, left_mouth = lm[3], lm[4]
-
-                                eye_dist = float(np.linalg.norm(left_eye - right_eye))
-                                if eye_dist > 1.0:
-                                    eye_cx = (right_eye[0] + left_eye[0]) / 2.0
-                                    eye_cy = (right_eye[1] + left_eye[1]) / 2.0
-                                    mouth_cy = (right_mouth[1] + left_mouth[1]) / 2.0
-
-                                    # Yaw: nose offset from eye center (looking sideways)
-                                    yaw_ratio = (nose[0] - eye_cx) / eye_dist
-                                    # Pitch: vertical face proportion (eyes to mouth distance)
-                                    # Low pitch = head tilted down (sleeping/slumped)
-                                    pitch_ratio = (mouth_cy - eye_cy) / eye_dist
-
-                                    # Face vertical position in person bounding box
-                                    face_center_y_abs = py1 + fy + fh / 2.0
-                                    person_h = py2 - py1
-                                    face_rel_y = (face_center_y_abs - py1) / person_h if person_h > 0 else 0.5
-
-                                    # WORKING = face upright, looking forward, not slumped
-                                    looking_at_screen = (
-                                        abs(yaw_ratio) < 0.35 and   # not looking too far left/right
-                                        pitch_ratio > 0.25 and      # not head down (sleeping/frustrated)
-                                        face_rel_y < 0.55           # not slumped over desk
-                                    )
+                                fx, fy_f, fw, fh = int(best_face[0]), int(best_face[1]), int(best_face[2]), int(best_face[3])
+                                face_box_abs = [px1 + fx, py1 + fy_f, px1 + fx + fw, py1 + fy_f + fh]
+                                
+                                landmarks = best_face[4:14].reshape(5, 2)
+                                head_score, yaw_ratio, pitch_ratio, face_rel_y = estimate_head_pose(
+                                    landmarks, fy_f, fh, 0, rh, camera_angle="elevated"
+                                )
                     except Exception:
                         pass
+
+                # Standing check
+                is_standing = False
+                p_w = x2 - x1
+                p_h = y2 - y1
+                if p_w > 0 and (p_h / float(p_w)) > 1.5:
+                    is_standing = True
 
                 # Phone-near-face (falls back to phone-near-body if no face was found)
                 phone_near = False
@@ -887,22 +932,56 @@ class CameraWorker:
                             has_laptop = True
                             break
 
-                # WORKING = near laptop + looking at screen + no phone
-                raw_working = has_laptop and looking_at_screen and not phone_near
+                ai_working = False
+                if hasattr(self, '_worker_classifier') and self._worker_classifier is not None and roi.size > 0:
+                    try:
+                        cls_res = self._worker_classifier(roi, verbose=False)[0]
+                        top1_name = cls_res.names[cls_res.probs.top1]
+                        ai_working = (top1_name == 'working')
+                    except Exception:
+                        pass
 
                 st = self._worker_states.get(tid)
                 if st is None:
                     self._worker_states[tid] = {
                         "work_s": 0.0, "idle_s": 0.0, "phone_s": 0.0, "talk_s": 0.0,
                         "working_s": 0.0, "not_working_s": 0.0,
-                        "status": "Working" if raw_working else ("Using Phone" if phone_near else "Idle"),
+                        "looking_away_s": 0.0,
+                        "status": "Idle",
                         "streak": 0, "gender": "Unknown", "box": p_box, "conf": p_conf,
-                        "lost_frames": 0, "raw_working": raw_working, "phone_near": phone_near,
-                        "has_laptop": has_laptop,
+                        "lost_frames": 0, "raw_working": False, "phone_near": phone_near,
+                        "has_laptop": has_laptop, "is_standing": is_standing,
+                        "score": 0, "head_metrics": (0.0, 0.0, 0.0, 0.5)
                     }
+                    st = self._worker_states[tid]
                 else:
                     st["box"], st["conf"], st["lost_frames"] = p_box, p_conf, 0
-                    st["raw_working"], st["phone_near"], st["has_laptop"] = raw_working, phone_near, has_laptop
+                    st["phone_near"], st["has_laptop"] = phone_near, has_laptop
+                    st["is_standing"] = is_standing
+                
+                # Strict Working Logic
+                is_working_now = False
+                score = 0
+                if not is_standing and has_laptop and not phone_near:
+                    # Evaluate posture
+                    if ai_working: score += 50
+                    score += head_score * 50
+                    if score >= 60:
+                        is_working_now = True
+
+                if is_working_now:
+                    st["looking_away_s"] = 0.0
+                else:
+                    st["looking_away_s"] += dt
+
+                # Hard Constraints override grace period
+                if is_standing or not has_laptop or phone_near:
+                    st["raw_working"] = False
+                else:
+                    st["raw_working"] = (st["looking_away_s"] <= 8.0)
+
+                st["score"] = score
+                st["head_metrics"] = (head_score, yaw_ratio, pitch_ratio, face_rel_y)
 
             # Talking: two currently-visible, not-working people standing close together for 5s+
             visible = [(tid, s) for tid, s in self._worker_states.items() if s.get("lost_frames", 0) == 0]
@@ -934,14 +1013,17 @@ class CameraWorker:
             for tid, s in self._worker_states.items():
                 if s.get("lost_frames", 0) > 0:
                     continue
-                if s["phone_near"]:
+                    
+                if s.get("is_standing"):
+                    target = "Standing"
+                elif not s["has_laptop"]:
+                    target = "No Laptop"
+                elif s["phone_near"]:
                     target = "Using Phone"
                 elif tid in talking_ids:
                     target = "Talking"
                 elif s["raw_working"]:
                     target = "Working"
-                elif not s["has_laptop"]:
-                    target = "No Laptop"
                 else:
                     target = "Looking Away"
 
@@ -1086,6 +1168,20 @@ class CameraWorker:
             cv2.rectangle(frame, (px1, bt_y - bt_h - 4), (px1 + bt_w + 8, bt_y + 2), color, 1)
             cv2.putText(frame, bottom_label, (px1 + 4, bt_y - 2),
                         font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+            # Debug HUD overlay
+            debug_info = [
+                f"Score: {s.get('score', 0):.0f}",
+                f"Head: {s.get('head_metrics', (0,0,0,0))[0]:.2f}",
+                f"Yaw: {s.get('head_metrics', (0,0,0,0))[1]:.2f}",
+                f"Pitch: {s.get('head_metrics', (0,0,0,0))[2]:.2f}",
+                f"FaceY: {s.get('head_metrics', (0,0,0,0))[3]:.2f}"
+            ]
+            debug_y = py1 + 20
+            for line in debug_info:
+                cv2.putText(frame, line, (px2 + 5, debug_y),
+                            font, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+                debug_y += 18
 
         # --- Top HUD bar ---
         total = working_count + not_working_count

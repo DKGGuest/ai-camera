@@ -2,40 +2,57 @@
 __pycache__/
 *.py[cod]
 *$py.class
+**/__pycache__/
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
 
 # Databases
 *.db
 *.sqlite3
 
 # Logs and Data
-*.csv
 *.log
+*.csv
+app_error.log
+app_error_utf8.log
+worker_logs.csv
 
-# Application Specific
+# Application Specific & Sensitive Local Data
 settings.json
+
+# Static Event Images
 static/events/*
 !static/events/.gitkeep
 
-# Training Data and Logs (DO NOT UPLOAD)
+# Training Data, Datasets, and Model Training Runs
 box_dataset/
 datasets/
 imagesbox/
 runs/
-__pycache__/
+worker_cls_train/
 
 # Media and Outputs
 *.mp4
+*.avi
+*.mov
 outputs/
+worker_images/
 
-# Auto-downloaded/Generated AI Models
+# Auto-downloaded/Generated AI Models & Weights (.pt, .onnx, etc.)
 *.onnx
-best_openvino_model/
-
-# Large Model Weight Files (exceed GitHub 100MB limit)
 *.pt
 *.pth
 weights/
+models/
+best_openvino_model/
 
-# OS generated files
+# OS and Editor Files
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
+

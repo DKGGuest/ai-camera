@@ -39,12 +39,12 @@ class PeopleCounterGUI:
         # Tracker config
         self.tracker_yaml = "custom_gui_botsort.yaml"
         with open(self.tracker_yaml, "w") as f:
-            f.write(f"""tracker_type: botsort
-track_high_thresh: 0.5
+            f.write(f"""tracker_type: bytetrack
+track_high_thresh: 0.2
 track_low_thresh: 0.1
 new_track_thresh: 0.6
 track_buffer: {track_buffer}
-match_thresh: 0.8
+match_thresh: 0.9
 gmc_method: sparseOptFlow
 proximity_thresh: 0.5
 appearance_thresh: 0.25
@@ -153,8 +153,8 @@ fuse_score: True
                 self.status = "Status: Running"
                 now = time.time()
                 
-                # YOLOv8 Tracking
-                results = self.model.track(frame, persist=True, verbose=False, conf=0.35, tracker=self.tracker_yaml)
+                # YOLOv8 Tracking (Lowered conf to 0.20 for motion blur)
+                results = self.model.track(frame, persist=True, verbose=False, conf=0.20, tracker=self.tracker_yaml)
                 
                 for r in results:
                     boxes = r.boxes
@@ -220,7 +220,7 @@ fuse_score: True
                                     if seq == [1, 2] or seq == [2, 1]:
                                         oldest_pt = t["history"][0]
                                         displacement = math.hypot(cx - oldest_pt[0], cy - oldest_pt[1])
-                                        min_dist = 0.3 * (x2 - x1)
+                                        min_dist = 0.2 * (x2 - x1)
                                         
                                         if displacement >= min_dist:
                                             if seq == [1, 2]:

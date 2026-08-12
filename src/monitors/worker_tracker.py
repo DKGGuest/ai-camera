@@ -135,19 +135,9 @@ def fmt_time(seconds):
 # ---------------------------------------------------------------------------
 # Head Pose Estimation from YuNet's 5 landmarks
 # ---------------------------------------------------------------------------
-def estimate_head_pose(landmarks, fy, fh, py1, py2):
+def estimate_head_pose(landmarks, fy, fh, py1, py2, camera_angle="frontal"):
     """
-    Estimate if a person is looking at their screen using YuNet's 5 face landmarks.
-    
-    Landmarks order: [right_eye, left_eye, nose, right_mouth, left_mouth]
-    
-    Returns:
-        looking_at_screen (bool): True if person appears to be looking at screen
-    
-    Detection of NOT WORKING states:
-        - Looking sideways (high |yaw|): person looking at window, talking to someone
-        - Head down (low pitch): sleeping on desk, frustrated head in hands
-        - Face too low in body bbox (high face_rel_y): slumped over, sleeping
+    Estimate head pose and return a head_score (0.0 to 1.0) along with raw metrics.
     """
     right_eye, left_eye = landmarks[0], landmarks[1]
     nose = landmarks[2]
@@ -155,7 +145,7 @@ def estimate_head_pose(landmarks, fy, fh, py1, py2):
 
     eye_dist = float(np.linalg.norm(left_eye - right_eye))
     if eye_dist < 1.0:
-        return False  # Unreliable landmarks
+        return 0.0, 0.0, 0.0, 0.5  # Unreliable landmarks
 
     # Eye center
     eye_cx = (right_eye[0] + left_eye[0]) / 2.0
@@ -163,28 +153,41 @@ def estimate_head_pose(landmarks, fy, fh, py1, py2):
     # Mouth center
     mouth_cy = (right_mouth[1] + left_mouth[1]) / 2.0
 
-    # YAW: nose horizontal offset from eye center / eye distance
-    # |yaw| > 0.35 → looking too far sideways (distracted, looking at window, talking)
+    # YAW
     yaw_ratio = (nose[0] - eye_cx) / eye_dist
-
-    # PITCH: vertical distance from eyes to mouth / eye distance
-    # Low pitch (< 0.25) → head tilted far down (sleeping, head in hands, frustrated)
+    # PITCH
     pitch_ratio = (mouth_cy - eye_cy) / eye_dist
-
-    # POSTURE: face vertical position in person bounding box
-    # If face center is in lower half of body bbox → slumped/sleeping posture
+    # POSTURE
     face_center_y = fy + fh / 2.0
     person_h = py2 - py1
     face_rel_y = face_center_y / person_h if person_h > 0 else 0.5
 
-    # WORKING = all three conditions met (relaxed to prevent false negatives for side profiles and looking down)
-    looking_at_screen = (
-        abs(yaw_ratio) < 0.9 and     # Allow looking sideways (up to near profile)
-        pitch_ratio > -0.2 and       # Allow looking down at a laptop
-        face_rel_y < 0.75            # Allow lower posture
-    )
+    # Calibrate thresholds based on camera angle
+    if camera_angle == "elevated":
+        # Elevated: Face appears lower, pitch is heavily downward
+        yaw_max = 0.8
+        pitch_min = -0.5
+        face_y_max = 0.85
+    elif camera_angle == "side":
+        yaw_max = 1.2
+        pitch_min = -0.2
+        face_y_max = 0.75
+    else:  # frontal
+        yaw_max = 0.5
+        pitch_min = -0.1
+        face_y_max = 0.65
 
-    return looking_at_screen
+    # Calculate score based on how close to 'perfect' the pose is
+    score = 1.0
+    if abs(yaw_ratio) > yaw_max:
+        score -= 0.5
+    if pitch_ratio < pitch_min:
+        score -= 0.8  # Heavy penalty for extreme head down (sleeping)
+    if face_rel_y > face_y_max:
+        score -= 0.5
+
+    head_score = max(0.0, min(1.0, score))
+    return head_score, yaw_ratio, pitch_ratio, face_rel_y
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +250,7 @@ def log_worker_event(csv_path, tid, s, new_status, now):
 # ---------------------------------------------------------------------------
 # Main run loop
 # ---------------------------------------------------------------------------
-def run(video_source="0", output_path="worker_tracker_output.mp4"):
+def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle="frontal", grace_period=8.0, debug=False):
     """Main worker tracking loop."""
 
     # Load models
@@ -380,7 +383,7 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
 
                     # --- YuNet Face Detection + Head Pose ---
                     face_box_abs = None
-                    looking_at_screen = False
+                    head_score, yaw_ratio, pitch_ratio, face_rel_y = 0.0, 0.0, 0.0, 0.5
                     if roi.size > 0:
                         try:
                             rh, rw = roi.shape[:2]
@@ -398,8 +401,8 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
 
                                     # Head pose from 5 landmarks
                                     landmarks = best_face[4:14].reshape(5, 2)
-                                    looking_at_screen = estimate_head_pose(
-                                        landmarks, fy_f, fh, 0, rh
+                                    head_score, yaw_ratio, pitch_ratio, face_rel_y = estimate_head_pose(
+                                        landmarks, fy_f, fh, 0, rh, camera_angle=camera_angle
                                     )
                         except Exception:
                             pass
@@ -419,6 +422,13 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
                             phone_near = True
                             break
 
+                    # Standing check
+                    is_standing = False
+                    p_w = x2 - x1
+                    p_h = y2 - y1
+                    if p_w > 0 and (p_h / float(p_w)) > 1.5:
+                        is_standing = True
+
                     # Laptop proximity
                     has_laptop = False
                     if laptop_boxes:
@@ -430,37 +440,60 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
                                 break
 
                     # Custom Classifier
+                    ai_working = False
                     if worker_classifier is not None and roi.size > 0:
                         try:
                             cls_res = worker_classifier(roi, verbose=False)[0]
                             top1_name = cls_res.names[cls_res.probs.top1]
-                            # Combine AI prediction with the strong heuristic indicators
-                            raw_working = ((top1_name == 'working') or has_laptop or looking_at_screen) and not phone_near
+                            ai_working = (top1_name == 'working')
                         except Exception:
-                            raw_working = (has_laptop or looking_at_screen) and not phone_near
-                    else:
-                        # Fallback to heuristic
-                        # WORKING = (near laptop OR looking at screen) and no phone
-                        # This prevents false negatives for people whose faces aren't perfectly detected or who are in profile.
-                        raw_working = (has_laptop or looking_at_screen) and not phone_near
+                            ai_working = False
 
                     # Update or create state
                     st = worker_states.get(tid)
                     if st is None:
-                        worker_states[tid] = {
+                        st = {
                             "working_s": 0.0, "not_working_s": 0.0,
                             "work_s": 0.0, "idle_s": 0.0, "phone_s": 0.0, "talk_s": 0.0,
-                            "status": "Working" if raw_working else ("Using Phone" if phone_near else "Idle"),
+                            "looking_away_s": 0.0,
+                            "status": "Idle",
                             "streak": 0,
                             "box": p_box, "conf": p_conf,
-                            "lost_frames": 0, "raw_working": raw_working,
+                            "lost_frames": 0, "raw_working": False,
                             "phone_near": phone_near, "has_laptop": has_laptop,
+                            "is_standing": is_standing,
+                            "score": 0, "head_metrics": (0.0, 0.0, 0.0, 0.5)
                         }
+                        worker_states[tid] = st
                     else:
                         st["box"], st["conf"], st["lost_frames"] = p_box, p_conf, 0
-                        st["raw_working"] = raw_working
                         st["phone_near"] = phone_near
                         st["has_laptop"] = has_laptop
+                        st["is_standing"] = is_standing
+                        
+                    # Strict Working Logic
+                    is_working_now = False
+                    score = 0
+                    if not is_standing and has_laptop and not phone_near:
+                        # Evaluate posture
+                        if ai_working: score += 50
+                        score += head_score * 50
+                        if score >= 60:
+                            is_working_now = True
+
+                    if is_working_now:
+                        st["looking_away_s"] = 0.0
+                    else:
+                        st["looking_away_s"] += dt
+
+                    # Hard Constraints override grace period
+                    if is_standing or not has_laptop or phone_near:
+                        st["raw_working"] = False
+                    else:
+                        st["raw_working"] = (st["looking_away_s"] <= grace_period)
+
+                    st["score"] = score
+                    st["head_metrics"] = (head_score, yaw_ratio, pitch_ratio, face_rel_y)
 
                 # --- Talking detection (two non-working people close for >5s) ---
                 visible = [
@@ -496,14 +529,17 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
                 for tid, s in worker_states.items():
                     if s.get("lost_frames", 0) > 0:
                         continue
-                    if s["phone_near"]:
+                        
+                    if s.get("is_standing"):
+                        target = "Standing"
+                    elif not s["has_laptop"]:
+                        target = "No Laptop"
+                    elif s["phone_near"]:
                         target = "Using Phone"
                     elif tid in talking_ids:
                         target = "Talking"
                     elif s["raw_working"]:
                         target = "Working"
-                    elif not s["has_laptop"]:
-                        target = "No Laptop"
                     else:
                         target = "Looking Away"
 
@@ -582,6 +618,21 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
                 px1, py1 = max(0, bx1 - 12), max(0, by1 - 12)
                 px2, py2 = min(width, bx2 + 12), min(height, by2 + 12)
                 cv2.rectangle(frame, (px1, py1), (px2, py2), color, 2)
+                
+                if debug:
+                    score = s.get("score", 0)
+                    h_score, y_r, p_r, f_y = s.get("head_metrics", (0.0, 0.0, 0.0, 0.5))
+                    debug_texts = [
+                        f"Score: {score:.1f}",
+                        f"Head: {h_score:.2f}",
+                        f"Yaw: {y_r:.2f}",
+                        f"Pitch: {p_r:.2f}",
+                        f"FaceY: {f_y:.2f}"
+                    ]
+                    dy = py1 + 15
+                    for d_txt in debug_texts:
+                        cv2.putText(frame, d_txt, (px2 + 5, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                        dy += 15
 
                 # --- Dual timer labels ---
                 w_time = fmt_time(s.get("working_s", 0.0))
@@ -731,13 +782,10 @@ def run(video_source="0", output_path="worker_tracker_output.mp4"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Worker Activity Tracker")
-    parser.add_argument(
-        "--video", type=str, default="0",
-        help="Path to input video file (.mp4), image (.jpg/.png), or camera index (0)",
-    )
-    parser.add_argument(
-        "--output", type=str, default="worker_tracker_output.mp4",
-        help="Path to save the output video",
-    )
+    parser.add_argument("--video", type=str, default="0", help="Path to input video file (.mp4), image (.jpg/.png), or camera index (0)")
+    parser.add_argument("--output", type=str, default="worker_tracker_output.mp4", help="Path to save the output video")
+    parser.add_argument("--camera_angle", type=str, default="frontal", choices=["frontal", "elevated", "side"], help="Camera angle for pose calibration")
+    parser.add_argument("--grace_period", type=float, default=8.0, help="Seconds a worker can look away before marked not working")
+    parser.add_argument("--debug", action="store_true", help="Show scoring metrics overlay")
     args = parser.parse_args()
-    run(args.video, args.output)
+    run(args.video, args.output, args.camera_angle, args.grace_period, args.debug)
