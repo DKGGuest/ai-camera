@@ -1,0 +1,51 @@
+camera:
+  camera_id: "cam_office_01"
+  stream_url: "0" # use "0" for webcam, or rtsp URL
+  resolution: [1920, 1080]
+  fps: 30
+
+models:
+  detection: "yolov8s.pt" # Standard COCO model is sufficient for Person/Laptop/Phone
+  pose: "yolov8n-pose.pt"
+  tracking: "botsort.yaml"
+  device: "cuda" # cuda or cpu
+  person_conf: 0.5
+  laptop_conf: 0.4
+  phone_conf: 0.3
+
+workstation:
+  # Example configuration for one workstation
+  WS-01:
+    person_zone: [200, 100, 800, 900] # [x1, y1, x2, y2]
+    laptop_zone: [400, 300, 700, 600]
+
+scoring:
+  positive:
+    person_detected: 20
+    laptop_detected: 20
+    inside_workstation: 10
+    sitting_posture: 20
+    hands_near_laptop: 15
+    body_oriented_toward: 10
+  
+  negative:
+    standing: -40
+    walking: -50
+    outside_workstation: -40
+    away: -50
+    laptop_absent: -30
+    long_inactivity: -20
+
+thresholds:
+  working_min: 70
+  uncertain_min: 40
+
+temporal:
+  working_confirmation_seconds: 2
+  not_working_confirmation_seconds: 1
+  uncertain_timeout_seconds: 5
+  fps_processing: 5 # Process 5 frames per second to save compute
+
+logging:
+  level: "INFO"
+  db_path: "database/activity.db"
