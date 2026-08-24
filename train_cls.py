@@ -13,11 +13,11 @@ def setup_dataset():
         
     # Create dataset directories
     for split in ['train', 'val']:
-        for cls in ['working', 'non-working', 'laptop_images']:
+        for cls in ['working', 'non-working', 'laptop_images', 'phone_images']:
             os.makedirs(os.path.join(dataset_dir, split, cls), exist_ok=True)
             
     # Process each class
-    for cls in ['working', 'non-working', 'laptop_images']:
+    for cls in ['working', 'non-working', 'laptop_images', 'phone_images']:
         cls_dir = os.path.join(source_dir, cls)
         if not os.path.exists(cls_dir):
             continue

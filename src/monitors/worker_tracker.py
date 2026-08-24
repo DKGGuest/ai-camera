@@ -26,6 +26,7 @@ import time
 import math
 import argparse
 import urllib.request
+import threading
 
 import cv2
 import numpy as np
@@ -193,6 +194,39 @@ def estimate_head_pose(landmarks, fy, fh, py1, py2, camera_angle="frontal"):
 # ---------------------------------------------------------------------------
 # Video initialization
 # ---------------------------------------------------------------------------
+class ThreadedCamera:
+    """Background thread to continuously grab the latest frame (zero latency)."""
+    def __init__(self, source):
+        self.cap = cv2.VideoCapture(source)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.ret, self.frame = self.cap.read()
+        self.running = True
+        self.thread = threading.Thread(target=self.update, args=())
+        self.thread.daemon = True
+        self.thread.start()
+
+    def update(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                self.ret = ret
+                self.frame = frame
+
+    def read(self):
+        return self.ret, self.frame
+
+    def isOpened(self):
+        return self.cap.isOpened()
+
+    def get(self, propId):
+        return self.cap.get(propId)
+
+    def release(self):
+        self.running = False
+        if self.thread.is_alive():
+            self.thread.join()
+        self.cap.release()
+
 def initialize_video(video_source):
     """Open video source. Returns frame/cap/metadata."""
     is_image = isinstance(video_source, str) and video_source.lower().endswith(
@@ -206,7 +240,7 @@ def initialize_video(video_source):
         return frame, None, frame.shape[1], frame.shape[0], 30.0, True
 
     source = int(video_source) if str(video_source).isdigit() else video_source
-    cap = cv2.VideoCapture(source)
+    cap = ThreadedCamera(source)
     if not cap.isOpened():
         print(f"Error: Could not open video source '{video_source}'")
         return None, None, 0, 0, 0, False
@@ -372,6 +406,22 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
 
                     person_dets.append((best_tid, p_box, p_conf))
 
+                # --- Assign laptops to closest person to handle facing-each-other scenarios ---
+                laptop_assignments = {}
+                for l_idx, (lb, _lconf, _lname) in enumerate(laptop_boxes):
+                    lcx, lcy = (lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2
+                    best_tid = None
+                    min_dist = float('inf')
+                    for tid, p_box, p_conf in person_dets:
+                        px1, py1, px2, py2 = p_box
+                        pcx, pcy = (px1 + px2) / 2, (py1 + py2) / 2
+                        dist = math.hypot(pcx - lcx, pcy - lcy)
+                        if dist < (px2 - px1) * 1.5 and dist < min_dist:
+                            min_dist = dist
+                            best_tid = tid
+                    if best_tid is not None:
+                        laptop_assignments[l_idx] = best_tid
+
                 # --- Activity classification per person ---
                 seen_ids = set()
                 for tid, p_box, p_conf in person_dets:
@@ -429,15 +479,37 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                     if p_w > 0 and (p_h / float(p_w)) > 1.5:
                         is_standing = True
 
-                    # Laptop proximity
+                    # Update or create state (must be done before saving history)
+                    st = worker_states.get(tid)
+                    if st is None:
+                        st = {
+                            "working_s": 0.0, "not_working_s": 0.0,
+                            "status": "Idle", "internal_status": "Idle",
+                            "box": p_box, "conf": p_conf,
+                            "lost_frames": 0, "raw_working": False,
+                            "phone_near": phone_near, "has_laptop": False,
+                            "is_standing": is_standing,
+                            "score": 0, "head_metrics": (0.0, 0.0, 0.0, 0.5),
+                            "history": []
+                        }
+                        worker_states[tid] = st
+                    else:
+                        st["box"], st["conf"], st["lost_frames"] = p_box, p_conf, 0
+                        st["phone_near"] = phone_near
+                        st["is_standing"] = is_standing
+
+                    # Persistent Laptop Association
                     has_laptop = False
-                    if laptop_boxes:
-                        pcx, pcy = (x1 + x2) / 2, (y1 + y2) / 2
-                        for lb, _lconf, _lname in laptop_boxes:
-                            lcx, lcy = (lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2
-                            if math.hypot(pcx - lcx, pcy - lcy) < (x2 - x1) * 3.5:
-                                has_laptop = True
-                                break
+                    for l_idx in laptop_assignments:
+                        if laptop_assignments[l_idx] == tid:
+                            has_laptop = True
+                            st["last_laptop_time"] = now # Refresh workstation association
+                            break
+                    
+                    if not has_laptop and (now - st.get("last_laptop_time", 0)) < 15.0:
+                        # Grace period: Temporary occlusion / loss of laptop detection (up to 15 seconds)
+                        has_laptop = True
+                    st["has_laptop"] = has_laptop
 
                     # Custom Classifier
                     ai_working = False
@@ -449,50 +521,50 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                         except Exception:
                             ai_working = False
 
-                    # Update or create state
-                    st = worker_states.get(tid)
-                    if st is None:
-                        st = {
-                            "working_s": 0.0, "not_working_s": 0.0,
-                            "work_s": 0.0, "idle_s": 0.0, "phone_s": 0.0, "talk_s": 0.0,
-                            "looking_away_s": 0.0,
-                            "status": "Idle",
-                            "streak": 0,
-                            "box": p_box, "conf": p_conf,
-                            "lost_frames": 0, "raw_working": False,
-                            "phone_near": phone_near, "has_laptop": has_laptop,
-                            "is_standing": is_standing,
-                            "score": 0, "head_metrics": (0.0, 0.0, 0.0, 0.5)
-                        }
-                        worker_states[tid] = st
-                    else:
-                        st["box"], st["conf"], st["lost_frames"] = p_box, p_conf, 0
-                        st["phone_near"] = phone_near
-                        st["has_laptop"] = has_laptop
-                        st["is_standing"] = is_standing
-                        
-                    # Strict Working Logic
-                    is_working_now = False
-                    score = 0
-                    if not is_standing and has_laptop and not phone_near:
-                        # Evaluate posture
-                        if ai_working: score += 50
-                        score += head_score * 50
-                        if score >= 60:
-                            is_working_now = True
+                    # Multi-signal scoring system
+                    sitting_score = 0 if is_standing else 30
+                    proximity_score = 20 if has_laptop else 0
+                    orientation_score = int(head_score * 30)
+                    ai_score = 20 if ai_working else 0
+                    
+                    # Final Working Score
+                    total_score = sitting_score + proximity_score + orientation_score + ai_score
 
-                    if is_working_now:
-                        st["looking_away_s"] = 0.0
+                    # Save for debug logs
+                    st["score_breakdown"] = {
+                        "Sitting": sitting_score,
+                        "Proximity": proximity_score,
+                        "Orientation": orientation_score,
+                        "AI": ai_score,
+                        "Total": total_score
+                    }
+                    
+                    # Determine instantaneous evidence
+                    if phone_near:
+                        inst_evidence = "NOT_WORKING"
+                    elif is_standing and not has_laptop:
+                        inst_evidence = "NOT_WORKING"
+                    elif total_score >= 50:
+                        inst_evidence = "WORKING"
                     else:
-                        st["looking_away_s"] += dt
+                        inst_evidence = "NOT_WORKING"
 
-                    # Hard Constraints override grace period
-                    if is_standing or not has_laptop or phone_near:
+                    # History buffer for temporal smoothing
+                    st["history"].append(inst_evidence)
+                    if len(st["history"]) > 30:
+                        st["history"].pop(0)
+
+                    # Calculate smoothed state based on history
+                    work_frames = st["history"].count("WORKING")
+                    not_work_frames = st["history"].count("NOT_WORKING")
+                    
+                    if work_frames >= 5: # Fast confirmation for working (e.g. 5 frames)
+                        st["raw_working"] = True
+                    elif not_work_frames >= 15: # Slower confirmation for NOT_WORKING (e.g. 15 frames)
                         st["raw_working"] = False
-                    else:
-                        st["raw_working"] = (st["looking_away_s"] <= grace_period)
+                    # Else keep previous raw_working state (temporal smoothing)
 
-                    st["score"] = score
+                    st["score"] = total_score
                     st["head_metrics"] = (head_score, yaw_ratio, pitch_ratio, face_rel_y)
 
                 # --- Talking detection (two non-working people close for >5s) ---
@@ -530,27 +602,37 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                     if s.get("lost_frames", 0) > 0:
                         continue
                         
-                    if s.get("is_standing"):
+                    if s.get("is_standing") and not s.get("raw_working"):
                         target = "Standing"
-                    elif not s["has_laptop"]:
+                    elif not s.get("has_laptop") and not s.get("raw_working"):
                         target = "No Laptop"
-                    elif s["phone_near"]:
+                    elif s.get("phone_near"):
                         target = "Using Phone"
                     elif tid in talking_ids:
                         target = "Talking"
-                    elif s["raw_working"]:
+                    elif s.get("raw_working"):
                         target = "Working"
                     else:
                         target = "Looking Away"
 
                     if target == s.get("pending", target):
-                        s["streak"] = s.get("streak", 0) + 1
+                        if "pending_since" not in s:
+                            s["pending_since"] = now
                     else:
-                        s["pending"], s["streak"] = target, 1
+                        s["pending"] = target
+                        s["pending_since"] = now
 
-                    if s["streak"] >= 2 and s.get("status") != target:
+                    if (now - s.get("pending_since", now)) >= 2.0 and s.get("status") != target:
                         log_worker_event(csv_path, tid, s, target, now)
                         s["status"] = target
+                    elif s.get("status") != target and (now - s.get("pending_since", now)) < 2.0:
+                        s["internal_status"] = "UNCERTAIN"
+                    else:
+                        s["internal_status"] = s.get("status")
+
+                    if debug:
+                        print(f"Worker #{tid} - State: {s.get('status')} | Internal: {s.get('internal_status')} | Target: {target}")
+                        print(f"  Breakdown: {s.get('score_breakdown', {})}")
 
                 # --- Cleanup lost tracks ---
                 for tid in list(worker_states.keys()):

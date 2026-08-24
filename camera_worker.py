@@ -309,21 +309,63 @@ class CameraWorker:
             if parsed.scheme in ('http', 'https') and parsed.path in ('', '/'):
                 src = src.rstrip('/') + '/video'
                 
+            # Automatically convert Main Stream to Sub Stream for known IP cameras (CP Plus, Dahua, Hikvision)
+            # CP Plus / Dahua
+            if "subtype=0" in src:
+                src = src.replace("subtype=0", "subtype=1")
+            # Hikvision
+            elif "Streaming/Channels/101" in src:
+                src = src.replace("Streaming/Channels/101", "Streaming/Channels/102")
+                
             # For network streams (RTSP/HTTP), use FFMPEG with no-buffer flags
             cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             return cap
 
+    def _http_mjpeg_loop(self, src):
+        import urllib.request
+        import urllib.parse
+        parsed = urllib.parse.urlparse(src)
+        if parsed.path in ('', '/'):
+            src = src.rstrip('/') + '/video'
+            
+        try:
+            stream = urllib.request.urlopen(src, timeout=5)
+            bytes_data = b''
+            while not self._stop and self._requested_camera_url is None:
+                chunk = stream.read(16384)
+                if not chunk:
+                    break
+                bytes_data += chunk
+                
+                # Find the last complete JPEG frame in the accumulated buffer
+                b = bytes_data.rfind(b'\xff\xd9')
+                if b != -1:
+                    a = bytes_data.rfind(b'\xff\xd8', 0, b)
+                    if a != -1:
+                        jpg = bytes_data[a:b+2]
+                        # Discard old frames by keeping only the remainder
+                        bytes_data = bytes_data[b+2:]
+                        
+                        frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            with self._status_lock:
+                                self._connected = True
+                                self._last_error = ""
+                            with self._raw_frame_lock:
+                                self._raw_frame = frame
+                            self._last_raw_frame = frame
+        except Exception as e:
+            with self._status_lock:
+                self._connected = False
+                self._last_error = f"Stream error: {e}"
+            time.sleep(2.0)
+
     def _capture_loop(self):
-        """Runs in its own thread, doing nothing but keeping self._raw_frame as fresh
-        as possible. This is what actually fixes multi-second RTSP lag: if this were
-        combined with the (slower) AI processing loop, frames would pile up in the
-        camera's network buffer every time a model took longer than one frame interval
-        to run. By reading continuously here, no backlog can ever accumulate — the
-        processing loop below just always grabs whatever is newest, however far behind
-        it currently is."""
+        """Runs in its own thread, keeping self._raw_frame as fresh as possible. 
+        Features a custom zero-lag MJPEG reader for HTTP streams (ESP32-CAM) and 
+        aggressive OpenCV grabbing for RTSP."""
         while not self._stop:
-            # Safely handle camera URL switch in the capture thread
             if self._requested_camera_url is not None:
                 self.camera_url = self._requested_camera_url
                 self._requested_camera_url = None
@@ -333,33 +375,38 @@ class CameraWorker:
                 with self._raw_frame_lock:
                     self._raw_frame = None
 
-            if self._cap is None:
-                self._cap = self._open_capture()
-                if not self._cap.isOpened():
+            src = str(self.camera_url)
+            if src.startswith('http'):
+                self._http_mjpeg_loop(src)
+            else:
+                if self._cap is None:
+                    self._cap = self._open_capture()
+                    if not self._cap.isOpened():
+                        with self._status_lock:
+                            self._connected = False
+                            self._last_error = f"Could not open camera stream: {self.camera_url}"
+                        time.sleep(2.0)
+                        self._cap = None
+                        continue
+
+                ret, frame = self._cap.read()
+                
+                if not ret or frame is None:
                     with self._status_lock:
                         self._connected = False
-                        self._last_error = f"Could not open camera stream: {self.camera_url}"
-                    time.sleep(2.0)
+                        self._last_error = "Lost connection to camera stream, retrying..."
+                    self._cap.release()
                     self._cap = None
+                    time.sleep(1.0)
                     continue
 
-            ret, frame = self._cap.read()
-            if not ret or frame is None:
                 with self._status_lock:
-                    self._connected = False
-                    self._last_error = "Lost connection to camera stream, retrying..."
-                self._cap.release()
-                self._cap = None
-                time.sleep(1.0)
-                continue
+                    self._connected = True
+                    self._last_error = ""
 
-            with self._status_lock:
-                self._connected = True
-                self._last_error = ""
-
-            with self._raw_frame_lock:
-                self._raw_frame = frame
-            self._last_raw_frame = frame
+                with self._raw_frame_lock:
+                    self._raw_frame = frame
+                self._last_raw_frame = frame
 
     def _loop(self):
         while not self._stop:
@@ -659,20 +706,20 @@ class CameraWorker:
                     curr_pt = (cx, cy)
                     
                     if now - t.get("last_counted_time", 0) > 2.0:
+                        mid1_x = (line1[0][0] + line1[1][0]) / 2
+                        mid2_x = (line2[0][0] + line2[1][0]) / 2
+                        
+                        prev_x, curr_x = prev_pt[0], curr_pt[0]
+                        
                         crossed_lines = []
-                        if intersect(prev_pt, curr_pt, line1[0], line1[1]):
+                        if min(prev_x, curr_x) <= mid1_x <= max(prev_x, curr_x) and prev_x != curr_x:
                             crossed_lines.append(1)
-                        if intersect(prev_pt, curr_pt, line2[0], line2[1]):
+                        if min(prev_x, curr_x) <= mid2_x <= max(prev_x, curr_x) and prev_x != curr_x:
                             crossed_lines.append(2)
                             
                         if len(crossed_lines) == 2:
-                            mid1_x = (line1[0][0] + line1[1][0]) / 2
-                            mid1_y = (line1[0][1] + line1[1][1]) / 2
-                            mid2_x = (line2[0][0] + line2[1][0]) / 2
-                            mid2_y = (line2[0][1] + line2[1][1]) / 2
-                            
-                            dist1 = math.hypot(prev_pt[0] - mid1_x, prev_pt[1] - mid1_y)
-                            dist2 = math.hypot(prev_pt[0] - mid2_x, prev_pt[1] - mid2_y)
+                            dist1 = abs(prev_x - mid1_x)
+                            dist2 = abs(prev_x - mid2_x)
                             if dist1 < dist2:
                                 crossed_lines = [1, 2]
                             else:
@@ -690,7 +737,7 @@ class CameraWorker:
                             if seq == [1, 2] or seq == [2, 1]:
                                 oldest_pt = t["history"][0]
                                 displacement = math.hypot(cx - oldest_pt[0], cy - oldest_pt[1])
-                                min_dist = 0.2 * (x2 - x1)
+                                min_dist = 0.1 * (x2 - x1)  # Relaxed displacement check for lag
                                 
                                 if displacement >= min_dist:
                                     if seq == [1, 2]:
@@ -740,11 +787,28 @@ class CameraWorker:
             cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
             database.log_people("periodic", self._people_entry_count, self._people_exit_count, photo_path)
 
-        cv2.rectangle(frame, (10, 10), (320, 120), (0, 0, 0), -1)
-        cv2.putText(frame, f"IN: {self._people_entry_count}", (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-        cv2.putText(frame, f"OUT: {self._people_exit_count}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-        inside_count = max(0, self._people_entry_count - self._people_exit_count)
-        cv2.putText(frame, f"Currently Inside: {inside_count}", (20, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        # Calculate mid points to determine which side is "inside"
+        mid1_x = (line1[0][0] + line1[1][0]) / 2
+        mid2_x = (line2[0][0] + line2[1][0]) / 2
+        
+        # Count live tracks
+        active_inside = 0
+        total_person = 0
+        if results and results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu()
+            total_person = len(boxes)
+            for box in boxes:
+                cx = (box[0] + box[2]) / 2
+                if mid2_x >= mid1_x and cx >= mid2_x:
+                    active_inside += 1
+                elif mid2_x < mid1_x and cx <= mid2_x:
+                    active_inside += 1
+                    
+        cv2.rectangle(frame, (10, 10), (320, 150), (0, 0, 0), -1)
+        cv2.putText(frame, f"IN: {self._people_entry_count}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(frame, f"OUT: {self._people_exit_count}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(frame, f"Total Person: {total_person}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, f"Active Inside: {active_inside}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
         
         if getattr(self, "_stationary_warning_until", 0) > now:
             warn_text = "WARNING: Lines may be placed in a seating/work area!"
@@ -928,7 +992,8 @@ class CameraWorker:
                     pcx, pcy = (x1 + x2) / 2, (y1 + y2) / 2
                     for lb, _lconf, _lname in laptop_boxes:
                         lcx, lcy = (lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2
-                        if math.hypot(pcx - lcx, pcy - lcy) < (x2 - x1) * 3.5:
+                        # Reduced from 3.5 to 1.8 to prevent associating laptops with wrong people
+                        if math.hypot(pcx - lcx, pcy - lcy) < (x2 - x1) * 1.8:
                             has_laptop = True
                             break
 
@@ -946,7 +1011,7 @@ class CameraWorker:
                     self._worker_states[tid] = {
                         "work_s": 0.0, "idle_s": 0.0, "phone_s": 0.0, "talk_s": 0.0,
                         "working_s": 0.0, "not_working_s": 0.0,
-                        "looking_away_s": 0.0,
+                        "looking_away_s": 8.1,  # Default to > 8s so new detections start as NOT WORKING until proven otherwise
                         "status": "Idle",
                         "streak": 0, "gender": "Unknown", "box": p_box, "conf": p_conf,
                         "lost_frames": 0, "raw_working": False, "phone_near": phone_near,
@@ -966,7 +1031,9 @@ class CameraWorker:
                     # Evaluate posture
                     if ai_working: score += 50
                     score += head_score * 50
-                    if score >= 60:
+                    
+                    # If AI classifier says working, or face looks at screen, they are working
+                    if score >= 40:
                         is_working_now = True
 
                 if is_working_now:
@@ -1169,19 +1236,7 @@ class CameraWorker:
             cv2.putText(frame, bottom_label, (px1 + 4, bt_y - 2),
                         font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
-            # Debug HUD overlay
-            debug_info = [
-                f"Score: {s.get('score', 0):.0f}",
-                f"Head: {s.get('head_metrics', (0,0,0,0))[0]:.2f}",
-                f"Yaw: {s.get('head_metrics', (0,0,0,0))[1]:.2f}",
-                f"Pitch: {s.get('head_metrics', (0,0,0,0))[2]:.2f}",
-                f"FaceY: {s.get('head_metrics', (0,0,0,0))[3]:.2f}"
-            ]
-            debug_y = py1 + 20
-            for line in debug_info:
-                cv2.putText(frame, line, (px2 + 5, debug_y),
-                            font, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
-                debug_y += 18
+            # Debug HUD overlay removed by user request
 
         # --- Top HUD bar ---
         total = working_count + not_working_count

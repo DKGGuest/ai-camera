@@ -64,6 +64,8 @@ class BoxCounter:
             else:
                 ids = [None] * len(boxes)
             
+            processed_track_ids = set()
+            
             for box, raw_track_id, cls_id, conf in zip(boxes, ids, classes, confs):
                 cls_name = names[cls_id]
                 if cls_name not in self.target_classes:
@@ -96,7 +98,7 @@ class BoxCounter:
                 else:
                     # Centroid fallback for completely untracked boxes (when tracker fails to assign any ID)
                     best_old_id = None
-                    best_dist = 150.0
+                    best_dist = 500.0
                     for old_id, info in self.track_history.items():
                         time_since_lost = now - info['time']
                         if 0 < time_since_lost < 1.0:
@@ -110,7 +112,8 @@ class BoxCounter:
                         # Generate a temporary negative ID to not conflict with tracker IDs
                         track_id = -int(time.time() * 1000) % 1000000
 
-                self.track_history[track_id] = {'time': now, 'cx': cx, 'cy': cy}
+                self.track_history[track_id] = {'time': now, 'cx': cx, 'cy': cy, 'box': box, 'cls_name': cls_name, 'conf': conf}
+                processed_track_ids.add(track_id)
 
                 if conf <= 0.30:
                     display_name = "untracked box"
@@ -199,6 +202,19 @@ class BoxCounter:
                             min_x, max_x = min(lx1, lx2) - 50, max(lx1, lx2) + 50
                             if min_x < cx < max_x and displacement < (x2 - x1):
                                 self._stationary_warning_until = now + 5.0
+                                
+            # Coasting: draw boxes that were missed in this frame but detected recently
+            for old_id, info in self.track_history.items():
+                if old_id not in processed_track_ids and (now - info['time'] < 1.0):
+                    x1, y1, x2, y2 = map(int, info['box'])
+                    cx, cy = info['cx'], info['cy']
+                    cls_name = info['cls_name']
+                    conf = info['conf']
+                    color = (0, 165, 255)  # Orange for untracked/coasting
+                    label = f"#{old_id} {cls_name} {conf:.2f} (track)"
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.circle(frame, (cx, cy), 5, color, -1)
+                    cv2.putText(frame, label, (x1, max(y1 - 10, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         to_delete = []
         for tid, t in self.tracks.items():

@@ -82,22 +82,30 @@ fuse_score: True
         
         # 3. Draw Counter Panels
         panel_y = y_offset + video_height
-        half_w = self.canvas_width // 2
+        third_w = self.canvas_width // 3
         
         # LEFT panel (Red background, "OUT")
-        cv2.rectangle(canvas, (0, panel_y), (half_w, panel_y + self.panel_height), (0, 0, 180), -1)
+        cv2.rectangle(canvas, (0, panel_y), (third_w, panel_y + self.panel_height), (0, 0, 180), -1)
+        # MIDDLE panel (Blue background, "ACTIVE")
+        cv2.rectangle(canvas, (third_w, panel_y), (2 * third_w, panel_y + self.panel_height), (150, 50, 0), -1)
         # RIGHT panel (Green background, "IN")
-        cv2.rectangle(canvas, (half_w, panel_y), (self.canvas_width, panel_y + self.panel_height), (0, 150, 0), -1)
+        cv2.rectangle(canvas, (2 * third_w, panel_y), (self.canvas_width, panel_y + self.panel_height), (0, 150, 0), -1)
         
         # Add text to LEFT panel
         cv2.putText(canvas, "OUT", (20, panel_y + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         out_text = f"{self.exits_out:04d}"
         cv2.putText(canvas, out_text, (20, panel_y + 100), cv2.FONT_HERSHEY_DUPLEX, 2.5, (255, 255, 255), 4)
         
+        # Add text to MIDDLE panel
+        cv2.putText(canvas, "ACTIVE INSIDE", (third_w + 20, panel_y + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        active_count = max(0, self.entries_in - self.exits_out)
+        active_text = f"{active_count:04d}"
+        cv2.putText(canvas, active_text, (third_w + 20, panel_y + 100), cv2.FONT_HERSHEY_DUPLEX, 2.5, (255, 255, 255), 4)
+
         # Add text to RIGHT panel
-        cv2.putText(canvas, "IN", (half_w + 20, panel_y + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(canvas, "IN", (2 * third_w + 20, panel_y + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         in_text = f"{self.entries_in:04d}"
-        cv2.putText(canvas, in_text, (half_w + 20, panel_y + 100), cv2.FONT_HERSHEY_DUPLEX, 2.5, (255, 255, 255), 4)
+        cv2.putText(canvas, in_text, (2 * third_w + 20, panel_y + 100), cv2.FONT_HERSHEY_DUPLEX, 2.5, (255, 255, 255), 4)
         
         # 4. Draw Status Line
         status_y = panel_y + self.panel_height
