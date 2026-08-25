@@ -628,7 +628,7 @@ class CameraWorker:
         
         # Default lines if not set in UI
         if not self._people_lines or len(self._people_lines) != 2:
-            gap = int(width * 0.15)
+            gap = 20  # ~0.5 cm gap
             mid_x = width // 2
             line1 = [(mid_x - gap, 0), (mid_x - gap, height)]
             line2 = [(mid_x + gap, 0), (mid_x + gap, height)]
@@ -643,7 +643,7 @@ class CameraWorker:
                 (int(pts[1][2] * width), int(pts[1][3] * height))
             ]
 
-        results = self._yolo.track(frame, persist=True, classes=[PERSON_CLASS], verbose=False, conf=0.20, tracker="custom_botsort.yaml")
+        results = self._yolo.track(frame, persist=True, classes=[PERSON_CLASS], verbose=False, conf=0.20, iou=0.4, tracker="custom_botsort.yaml")
         
         def ccw(A, B, C):
             return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
@@ -684,6 +684,14 @@ class CameraWorker:
                         self._people_id_mapping[raw_track_id] = best_old_id
                 
                 track_id = self._people_id_mapping.get(raw_track_id, raw_track_id)
+                
+                # Centroid smoothing to prevent flickering/fluctuating dots
+                if track_id in self._people_tracks and self._people_tracks[track_id]["history"]:
+                    prev_cx, prev_cy, _ = self._people_tracks[track_id]["history"][-1]
+                    alpha = 0.5  # 50% current, 50% previous
+                    cx = int(alpha * cx + (1 - alpha) * prev_cx)
+                    cy = int(alpha * cy + (1 - alpha) * prev_cy)
+
                 self._people_track_history[track_id] = {'time': now, 'cx': cx, 'cy': cy}
                 
                 if track_id not in self._people_tracks:
@@ -939,6 +947,30 @@ class CameraWorker:
                 
                 person_dets.append((best_tid, p_box, p_conf))
 
+            # --- 1-to-1 Laptop Assignment ---
+            # Prevents multiple people from claiming the same laptop
+            laptop_assignments = {}
+            for l_idx, (lb, _lconf, _lname) in enumerate(laptop_boxes):
+                lcx, lcy = (lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2
+                best_tid = None
+                min_dist = float('inf')
+                for tid, p_box, p_conf in person_dets:
+                    px1, py1, px2, py2 = p_box
+                    pcx, pcy = (px1 + px2) / 2, (py1 + py2) / 2
+                    
+                    dist = math.hypot(pcx - lcx, pcy - lcy)
+                    margin = 50
+                    is_overlapping = (px1 - margin <= lcx <= px2 + margin) and (py1 - margin <= lcy <= py2 + margin)
+                    
+                    # Must be touching or within expanded distance
+                    if is_overlapping or dist < (px2 - px1) * 2.5:
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_tid = tid
+                            
+                if best_tid is not None:
+                    laptop_assignments[l_idx] = best_tid
+
             seen_ids = set()
             for tid, p_box, p_conf in person_dets:
                 seen_ids.add(tid)
@@ -972,7 +1004,7 @@ class CameraWorker:
                 is_standing = False
                 p_w = x2 - x1
                 p_h = y2 - y1
-                if p_w > 0 and (p_h / float(p_w)) > 1.5:
+                if p_w > 0 and (p_h / float(p_w)) > 2.2: # Increased threshold because upper body sitting can be tall
                     is_standing = True
 
                 # Phone-near-face (falls back to phone-near-body if no face was found)
@@ -986,16 +1018,8 @@ class CameraWorker:
                         phone_near = True
                         break
 
-                # Nearest-laptop association
-                has_laptop = False
-                if laptop_boxes:
-                    pcx, pcy = (x1 + x2) / 2, (y1 + y2) / 2
-                    for lb, _lconf, _lname in laptop_boxes:
-                        lcx, lcy = (lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2
-                        # Reduced from 3.5 to 1.8 to prevent associating laptops with wrong people
-                        if math.hypot(pcx - lcx, pcy - lcy) < (x2 - x1) * 1.8:
-                            has_laptop = True
-                            break
+                # Nearest-laptop association (Strict 1-to-1)
+                has_laptop = any(laptop_assignments.get(l_idx) == tid for l_idx in range(len(laptop_boxes)))
 
                 ai_working = False
                 if hasattr(self, '_worker_classifier') and self._worker_classifier is not None and roi.size > 0:
@@ -1024,16 +1048,21 @@ class CameraWorker:
                     st["phone_near"], st["has_laptop"] = phone_near, has_laptop
                     st["is_standing"] = is_standing
                 
-                # Strict Working Logic
+                # Strict Working Logic (60/40 Split)
                 is_working_now = False
                 score = 0
+                
+                # Base condition: Must be sitting with a laptop and no phone
                 if not is_standing and has_laptop and not phone_near:
-                    # Evaluate posture
-                    if ai_working: score += 50
-                    score += head_score * 50
+                    score += 60  # Base 60% just for sitting in front of laptop
                     
-                    # If AI classifier says working, or face looks at screen, they are working
-                    if score >= 40:
+                    # Remaining 40% from other AI/posture conditions
+                    if ai_working: 
+                        score += 20
+                    score += head_score * 20
+                    
+                    # Any score >= 60 means they are working (so just sitting + laptop is enough)
+                    if score >= 60:
                         is_working_now = True
 
                 if is_working_now:

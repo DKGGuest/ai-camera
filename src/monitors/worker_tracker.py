@@ -339,16 +339,18 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
             # ---- Detection (every 2nd frame for performance) ----
             if frame_count % 2 == 1:
                 # YOLO classes: person=0, laptop=62, tv=63, mouse=64, keyboard=66, cell_phone=67
-                results = yolo(frame, classes=[0, 62, 63, 64, 66, 67], conf=0.05, verbose=False)
+                # Using botsort for ReID (appearance features like shirt color/body structure) for stable IDs
+                results = yolo.track(frame, classes=[0, 62, 63, 64, 66, 67], conf=0.05, persist=True, tracker="botsort.yaml", verbose=False)
                 r = results[0]
 
-                person_candidates, person_scores = [], []
+                person_candidates, person_scores, person_ids = [], [], []
                 laptop_candidates, laptop_scores, laptop_names = [], [], []
                 phone_candidates, phone_scores = [], []
 
                 if r.boxes is not None:
-                    for box, conf, cls in zip(
-                        r.boxes.xyxy.cpu(), r.boxes.conf.cpu(), r.boxes.cls.cpu()
+                    ids = r.boxes.id.int().cpu().tolist() if r.boxes.id is not None else [None] * len(r.boxes)
+                    for box, conf, cls, track_id in zip(
+                        r.boxes.xyxy.cpu(), r.boxes.conf.cpu(), r.boxes.cls.cpu(), ids
                     ):
                         x1, y1, x2, y2 = map(int, box)
                         cls_name = yolo.names[int(cls)]
@@ -357,6 +359,7 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                         if cls_name == "person" and c >= 0.20:
                             person_candidates.append([x1, y1, x2, y2])
                             person_scores.append(c)
+                            person_ids.append(track_id)
                         elif cls_name in ("laptop", "tv", "mouse", "keyboard") and c >= 0.10:
                             laptop_candidates.append([x1, y1, x2, y2])
                             laptop_scores.append(c)
@@ -367,7 +370,7 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
 
                 # NMS
                 keep_p = nms_boxes(person_candidates, person_scores, 0.4)
-                person_raw = [(person_candidates[i], person_scores[i]) for i in keep_p]
+                person_raw = [(person_candidates[i], person_scores[i], person_ids[i]) for i in keep_p]
 
                 keep_l = nms_boxes(laptop_candidates, laptop_scores, 0.3)
                 laptop_boxes = [(laptop_candidates[i], laptop_scores[i], laptop_names[i]) for i in keep_l]
@@ -375,38 +378,25 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                 keep_ph = nms_boxes(phone_candidates, phone_scores, 0.3)
                 phone_boxes = [(phone_candidates[i], phone_scores[i]) for i in keep_ph]
 
-                # --- Centroid-based tracking ---
+                # --- ReID-based tracking ---
                 person_dets = []
-                next_id = 0
-                if worker_states:
-                    next_id = max(worker_states.keys()) + 1
+                
+                if not hasattr(yolo, "id_mapping"):
+                    yolo.id_mapping = {}
+                    yolo.next_mapped_id = 1
 
-                used_tids = set()
-                for p_box, p_conf in person_raw:
-                    x1, y1, x2, y2 = p_box
-                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-
-                    best_tid, min_dist = None, 200
-                    for tid, st in worker_states.items():
-                        if tid in used_tids or st.get("lost_frames", 0) > 0:
-                            continue
-                        old_box = st["box"]
-                        old_cx = (old_box[0] + old_box[2]) / 2
-                        old_cy = (old_box[1] + old_box[3]) / 2
-                        dist = math.hypot(cx - old_cx, cy - old_cy)
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_tid = tid
-
-                    if best_tid is None:
-                        best_tid = next_id
-                        next_id += 1
-                    else:
-                        used_tids.add(best_tid)
-
+                for p_box, p_conf, raw_tid in person_raw:
+                    if raw_tid is None:
+                        continue # Skip untracked persons
+                        
+                    if raw_tid not in yolo.id_mapping:
+                        yolo.id_mapping[raw_tid] = yolo.next_mapped_id
+                        yolo.next_mapped_id += 1
+                        
+                    best_tid = yolo.id_mapping[raw_tid]
                     person_dets.append((best_tid, p_box, p_conf))
 
-                # --- Assign laptops to closest person to handle facing-each-other scenarios ---
+                # --- Assign laptops to closest person to handle facing-each-other scenarios (1-to-1) ---
                 laptop_assignments = {}
                 for l_idx, (lb, _lconf, _lname) in enumerate(laptop_boxes):
                     lcx, lcy = (lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2
@@ -415,10 +405,17 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                     for tid, p_box, p_conf in person_dets:
                         px1, py1, px2, py2 = p_box
                         pcx, pcy = (px1 + px2) / 2, (py1 + py2) / 2
+                        
                         dist = math.hypot(pcx - lcx, pcy - lcy)
-                        if dist < (px2 - px1) * 1.5 and dist < min_dist:
-                            min_dist = dist
-                            best_tid = tid
+                        margin = 50
+                        is_overlapping = (px1 - margin <= lcx <= px2 + margin) and (py1 - margin <= lcy <= py2 + margin)
+                        
+                        # Must be touching or within expanded distance
+                        if is_overlapping or dist < (px2 - px1) * 2.5:
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_tid = tid
+                                
                     if best_tid is not None:
                         laptop_assignments[l_idx] = best_tid
 
@@ -476,7 +473,7 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                     is_standing = False
                     p_w = x2 - x1
                     p_h = y2 - y1
-                    if p_w > 0 and (p_h / float(p_w)) > 1.5:
+                    if p_w > 0 and (p_h / float(p_w)) > 2.2: # Increased threshold because upper body sitting can be tall
                         is_standing = True
 
                     # Update or create state (must be done before saving history)
@@ -498,17 +495,15 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                         st["phone_near"] = phone_near
                         st["is_standing"] = is_standing
 
-                    # Persistent Laptop Association
-                    has_laptop = False
-                    for l_idx in laptop_assignments:
-                        if laptop_assignments[l_idx] == tid:
-                            has_laptop = True
-                            st["last_laptop_time"] = now # Refresh workstation association
-                            break
+                    # Nearest-laptop association (Strict 1-to-1)
+                    has_laptop = any(laptop_assignments.get(l_idx) == tid for l_idx in range(len(laptop_boxes)))
                     
                     if not has_laptop and (now - st.get("last_laptop_time", 0)) < 15.0:
                         # Grace period: Temporary occlusion / loss of laptop detection (up to 15 seconds)
                         has_laptop = True
+                        
+                    if has_laptop:
+                        st["last_laptop_time"] = now
                     st["has_laptop"] = has_laptop
 
                     # Custom Classifier
@@ -521,10 +516,15 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                         except Exception:
                             ai_working = False
 
-                    # Multi-signal scoring system
-                    sitting_score = 0 if is_standing else 30
-                    proximity_score = 20 if has_laptop else 0
-                    orientation_score = int(head_score * 30)
+                    # Multi-signal scoring system (60/40 split)
+                    sitting_score = 0
+                    proximity_score = 0
+                    
+                    if not is_standing and has_laptop and not phone_near:
+                        sitting_score = 30
+                        proximity_score = 30
+                        
+                    orientation_score = int(head_score * 20)
                     ai_score = 20 if ai_working else 0
                     
                     # Final Working Score
@@ -542,9 +542,9 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                     # Determine instantaneous evidence
                     if phone_near:
                         inst_evidence = "NOT_WORKING"
-                    elif is_standing and not has_laptop:
+                    elif is_standing or not has_laptop:
                         inst_evidence = "NOT_WORKING"
-                    elif total_score >= 50:
+                    elif total_score >= 60:
                         inst_evidence = "WORKING"
                     else:
                         inst_evidence = "NOT_WORKING"
