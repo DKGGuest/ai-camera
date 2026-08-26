@@ -74,19 +74,19 @@ class BoxCounter:
                 if conf <= 0.01:
                     continue
 
-                x1, y1, x2, y2 = map(int, box)
-                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                raw_x1, raw_y1, raw_x2, raw_y2 = map(int, box)
+                raw_cx, raw_cy = (raw_x1 + raw_x2) // 2, (raw_y1 + raw_y2) // 2
 
                 # --- FALLBACK BOX RE-LINKING ---
                 if raw_track_id is not None:
                     if raw_track_id not in self.id_mapping and raw_track_id not in self.track_history:
                         best_old_id = None
-                        best_dist = 400.0  # Allow large jumps for fast movement / rotations
+                        best_dist = 2000.0  # Allow extremely large jumps for stream lag / frame drops
                         
                         for old_id, info in self.track_history.items():
                             time_since_lost = now - info['time']
-                            if 0 < time_since_lost < 2.0:
-                                dist = math.hypot(cx - info['cx'], cy - info['cy'])
+                            if 0 < time_since_lost < 3.0:
+                                dist = math.hypot(raw_cx - info['cx'], raw_cy - info['cy'])
                                 if dist < best_dist:
                                     best_dist = dist
                                     best_old_id = old_id
@@ -98,11 +98,11 @@ class BoxCounter:
                 else:
                     # Centroid fallback for completely untracked boxes (when tracker fails to assign any ID)
                     best_old_id = None
-                    best_dist = 500.0
+                    best_dist = 2000.0
                     for old_id, info in self.track_history.items():
                         time_since_lost = now - info['time']
-                        if 0 < time_since_lost < 1.0:
-                            dist = math.hypot(cx - info['cx'], cy - info['cy'])
+                        if 0 < time_since_lost < 3.0:
+                            dist = math.hypot(raw_cx - info['cx'], raw_cy - info['cy'])
                             if dist < best_dist:
                                 best_dist = dist
                                 best_old_id = old_id
@@ -112,7 +112,20 @@ class BoxCounter:
                         # Generate a temporary negative ID to not conflict with tracker IDs
                         track_id = -int(time.time() * 1000) % 1000000
 
-                self.track_history[track_id] = {'time': now, 'cx': cx, 'cy': cy, 'box': box, 'cls_name': cls_name, 'conf': conf}
+                # Custom model is highly stable, removing EMA smoothing to prevent lag/separation
+                x1, y1, x2, y2 = raw_x1, raw_y1, raw_x2, raw_y2
+                
+                smoothed_box = (x1, y1, x2, y2)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+                self.track_history[track_id] = {
+                    'time': now, 
+                    'cx': cx, 'cy': cy, 
+                    'box': box, 
+                    'smoothed_box': smoothed_box,
+                    'cls_name': cls_name, 
+                    'conf': conf
+                }
                 processed_track_ids.add(track_id)
 
                 if conf <= 0.30:
@@ -159,8 +172,10 @@ class BoxCounter:
                                 crossed_lines.append(2)
                                 
                             if len(crossed_lines) == 2:
-                                dist1 = abs(prev_pt[0] - line1[0][0])
-                                dist2 = abs(prev_pt[0] - line2[0][0])
+                                mid1_x, mid1_y = (line1[0][0] + line1[1][0]) / 2, (line1[0][1] + line1[1][1]) / 2
+                                mid2_x, mid2_y = (line2[0][0] + line2[1][0]) / 2, (line2[0][1] + line2[1][1]) / 2
+                                dist1 = (prev_pt[0] - mid1_x)**2 + (prev_pt[1] - mid1_y)**2
+                                dist2 = (prev_pt[0] - mid2_x)**2 + (prev_pt[1] - mid2_y)**2
                                 if dist1 < dist2:
                                     crossed_lines = [1, 2]
                                 else:
@@ -178,7 +193,7 @@ class BoxCounter:
                                 if seq == [1, 2] or seq == [2, 1]:
                                     oldest_pt = t["history"][0]
                                     displacement = math.hypot(cx - oldest_pt[0], cy - oldest_pt[1])
-                                    min_dist = 0.3 * (x2 - x1)
+                                    min_dist = 0.15 * (x2 - x1)  # Lowered to 0.15 to capture smaller movements across lines
                                     
                                     if displacement >= min_dist:
                                         if seq == [1, 2]:
@@ -205,8 +220,9 @@ class BoxCounter:
                                 
             # Coasting: draw boxes that were missed in this frame but detected recently
             for old_id, info in self.track_history.items():
-                if old_id not in processed_track_ids and (now - info['time'] < 1.0):
-                    x1, y1, x2, y2 = map(int, info['box'])
+                if old_id not in processed_track_ids and (now - info['time'] < 2.5):
+                    sb = info.get('smoothed_box', info['box'])
+                    x1, y1, x2, y2 = map(int, sb)
                     cx, cy = info['cx'], info['cy']
                     cls_name = info['cls_name']
                     conf = info['conf']

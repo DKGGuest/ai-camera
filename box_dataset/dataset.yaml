@@ -1,5 +1,6 @@
-path: C:\Users\user\Desktop\New folder\webapp 21341235\box_dataset
+
+path: c:\Users\user\Desktop\New folder\webapp 21341235\box_dataset
 train: images/train
 val: images/val
 names:
-  0: box
+  0: cardboard box

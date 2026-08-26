@@ -516,15 +516,16 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                         except Exception:
                             ai_working = False
 
-                    # Multi-signal scoring system (60/40 split)
-                    sitting_score = 0
-                    proximity_score = 0
+                    # Multi-signal scoring system
+                    sitting_score = 30 if not is_standing else 0
+                    proximity_score = 30 if has_laptop else 0
                     
-                    if not is_standing and has_laptop and not phone_near:
-                        sitting_score = 30
-                        proximity_score = 30
+                    if face_box_abs is None:
+                        # Face not detected implies facing away from the camera towards the desk/monitor
+                        orientation_score = 30
+                    else:
+                        orientation_score = int(head_score * 20)
                         
-                    orientation_score = int(head_score * 20)
                     ai_score = 20 if ai_working else 0
                     
                     # Final Working Score
@@ -540,7 +541,9 @@ def run(video_source="0", output_path="worker_tracker_output.mp4", camera_angle=
                     }
                     
                     # Determine instantaneous evidence
-                    if phone_near:
+                    if not is_standing and has_laptop:
+                        inst_evidence = "WORKING"
+                    elif phone_near:
                         inst_evidence = "NOT_WORKING"
                     elif is_standing or not has_laptop:
                         inst_evidence = "NOT_WORKING"
