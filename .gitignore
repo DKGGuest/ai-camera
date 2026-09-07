@@ -39,8 +39,12 @@ worker_cls_train/
 *.mp4
 *.avi
 *.mov
+*.jpg
+*.jpeg
+*.png
 outputs/
 worker_images/
+chair_images/
 
 # Auto-downloaded/Generated AI Models & Weights (.pt, .onnx, etc.)
 *.onnx

@@ -32,6 +32,22 @@ def load_custom_box_model():
         return YOLO(config.YOLO_MODEL_PATH)
 
 
+def load_desk_model():
+    print("Loading YOLOv8m model for desk occupancy...")
+    # Using YOLOv8m for high accuracy in large spaces
+    return YOLO("yolov8m.pt")
+
+
+def load_chair_classifier():
+    classifier_path = os.path.join(config.BASE_DIR, "chair_classifier.pt")
+    print(f"Loading custom chair classifier ({classifier_path})...")
+    if os.path.exists(classifier_path):
+        return YOLO(classifier_path)
+    else:
+        print("Warning: Custom chair classifier not found.")
+        return None
+
+
 def load_worker_classifier():
     classifier_path = os.path.join(config.BASE_DIR, "worker_classifier.pt")
     print(f"Loading custom worker classifier ({classifier_path})...")

@@ -112,8 +112,16 @@ class BoxCounter:
                         # Generate a temporary negative ID to not conflict with tracker IDs
                         track_id = -int(time.time() * 1000) % 1000000
 
-                # Custom model is highly stable, removing EMA smoothing to prevent lag/separation
-                x1, y1, x2, y2 = raw_x1, raw_y1, raw_x2, raw_y2
+                # Smooth the bounding box to prevent instability during stream lag
+                if track_id in self.track_history:
+                    alpha = 0.5
+                    old_sb = self.track_history[track_id].get('smoothed_box', (raw_x1, raw_y1, raw_x2, raw_y2))
+                    x1 = int(alpha * raw_x1 + (1 - alpha) * old_sb[0])
+                    y1 = int(alpha * raw_y1 + (1 - alpha) * old_sb[1])
+                    x2 = int(alpha * raw_x2 + (1 - alpha) * old_sb[2])
+                    y2 = int(alpha * raw_y2 + (1 - alpha) * old_sb[3])
+                else:
+                    x1, y1, x2, y2 = raw_x1, raw_y1, raw_x2, raw_y2
                 
                 smoothed_box = (x1, y1, x2, y2)
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
@@ -182,7 +190,8 @@ class BoxCounter:
                                     crossed_lines = [2, 1]
                                     
                             for crossed in crossed_lines:
-                                if t.get("last_cross_time", 0) and now - t["last_cross_time"] > 5.0:
+                                # Increased timeout from 5.0 to 15.0 to allow slow-moving boxes to cross both lines
+                                if t.get("last_cross_time", 0) and now - t["last_cross_time"] > 15.0:
                                     t["crossings"] = []
                                 if not t["crossings"] or t["crossings"][-1] != crossed:
                                     t["crossings"].append(crossed)
@@ -193,7 +202,7 @@ class BoxCounter:
                                 if seq == [1, 2] or seq == [2, 1]:
                                     oldest_pt = t["history"][0]
                                     displacement = math.hypot(cx - oldest_pt[0], cy - oldest_pt[1])
-                                    min_dist = 0.15 * (x2 - x1)  # Lowered to 0.15 to capture smaller movements across lines
+                                    min_dist = 5.0  # Relaxed from 0.15 * width to a flat 5.0 pixels to capture any real movement
                                     
                                     if displacement >= min_dist:
                                         if seq == [1, 2]:
