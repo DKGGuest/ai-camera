@@ -1768,8 +1768,8 @@ class CameraWorker:
     def _process_room(self, frame):
         self._ensure_models_loaded()
         
-        # Use the standard loaded YOLO model with lower IoU to prevent double detections
-        results = self._yolo(frame, classes=[PERSON_CLASS], iou=0.3, verbose=False)
+        # Use the standard loaded YOLO model with ByteTrack to eliminate flickering
+        results = self._yolo.track(frame, classes=[PERSON_CLASS], persist=True, tracker="botsort.yaml", verbose=False)
         
         people_count = 0
         if results[0].boxes is not None:
@@ -1777,7 +1777,7 @@ class CameraWorker:
             confidences = results[0].boxes.conf.cpu()
             
             for box, conf in zip(boxes, confidences):
-                if conf < 0.4:
+                if conf < 0.25: # Lowered threshold to catch occluded people
                     continue
                     
                 people_count += 1

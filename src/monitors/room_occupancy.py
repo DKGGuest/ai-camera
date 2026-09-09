@@ -32,8 +32,8 @@ def run(video_source='0', output_path='room_output.mp4'):
     while True:
         loop_start = time.time()
         
-        # Use the standard loaded YOLO model with lower IoU to prevent double detections
-        results = model(frame, classes=[PERSON_CLASS], iou=0.3, verbose=False)
+        # Use the model with ByteTrack to eliminate flickering
+        results = model.track(frame, classes=[0], persist=True, tracker="botsort.yaml", verbose=False)
         
         people_count = 0
         
@@ -42,7 +42,7 @@ def run(video_source='0', output_path='room_output.mp4'):
             confidences = results[0].boxes.conf.cpu()
             
             for box, conf in zip(boxes, confidences):
-                if conf < 0.4:
+                if conf < 0.25: # Lowered threshold to catch occluded people
                     continue
                     
                 people_count += 1
