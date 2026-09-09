@@ -58,7 +58,7 @@
         <span class="label">Active Model:</span>
         {% for m in modes %}
           <button class="mode-btn" data-mode="{{ m }}">
-            {{ {"access": "Access Control (Entry/Exit)", "vehicle": "Vehicle Detection", "adaptive": "Adaptive Bitrate", "people": "People Counter", "worker": "Worker Tracker", "queue": "Queue Monitor", "box": "Bags & Boxes Counter", "desk": "Desk Occupancy"}.get(m, m|capitalize) }}
+            {{ {"access": "Access Control (Entry/Exit)", "vehicle": "Vehicle Detection", "adaptive": "Adaptive Bitrate", "people": "People Counter", "worker": "Worker Tracker", "queue": "Queue Monitor", "box": "Bags & Boxes Counter", "desk": "Desk Occupancy", "room": "Room Occupancy"}.get(m, m|capitalize) }}
           </button>
         {% endfor %}
       </div>

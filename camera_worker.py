@@ -17,7 +17,7 @@ import database
 import models_loader
 import math
 
-MODES = ("access", "vehicle", "adaptive", "people", "worker", "queue", "box", "desk")
+MODES = ("access", "vehicle", "adaptive", "people", "worker", "queue", "box", "desk", "room")
 VEHICLE_CLASSES = [2, 3, 5, 7]   # car, motorcycle, bus, truck (COCO ids)
 PERSON_CLASS = 0
 
@@ -318,6 +318,16 @@ class CameraWorker:
             self._custom_box_model = models_loader.load_custom_box_model()
         if not hasattr(self, '_worker_classifier') or self._worker_classifier is None:
             self._worker_classifier = models_loader.load_worker_classifier()
+        if not hasattr(self, '_chair_classifier') or self._chair_classifier is None:
+            import os
+            from ultralytics import YOLO
+            classifier_path = os.path.join(os.path.dirname(__file__), 'runs', 'classify', 'chair_classifier', 'weights', 'best.pt')
+            if os.path.exists(classifier_path):
+                self._chair_classifier = YOLO(classifier_path)
+                print(f"[DeskOccupancy] Loaded chair classifier from {classifier_path}")
+            else:
+                self._chair_classifier = None
+                print(f"[DeskOccupancy] WARNING: Chair classifier not found at {classifier_path}")
         self._box_counter = BoxCounter()
         self._face_detector, self._face_recognizer = models_loader.load_face_models()
         self._known_embeddings = models_loader.load_known_faces(
@@ -476,6 +486,8 @@ class CameraWorker:
                     out = self._process_box(frame)
                 elif self.mode == "desk":
                     out = self._process_desk(frame)
+                elif self.mode == "room":
+                    out = self._process_room(frame)
                 else:
                     out = self._process_adaptive(frame)
             except Exception as e:
@@ -531,202 +543,223 @@ class CameraWorker:
             angle_rad = math.acos(max(-1.0, min(1.0, dot_product / (mag1 * mag2))))
             return math.degrees(angle_rad)
 
-        def point_in_box(point, box, padding=0):
-            x, y = point
-            x1, y1, x2, y2 = box
-            return (x1 - padding) <= x <= (x2 + padding) and (y1 - padding) <= y <= (y2 + padding)
-            
-        def bb_iou(boxA, boxB):
+        def is_duplicate_box(boxA, boxB):
             xA = max(boxA[0], boxB[0])
             yA = max(boxA[1], boxB[1])
             xB = min(boxA[2], boxB[2])
             yB = min(boxA[3], boxB[3])
             interArea = max(0, xB - xA) * max(0, yB - yA)
-            boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-            boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-            if float(boxAArea + boxBArea - interArea) == 0: return 0
-            return interArea / float(boxAArea + boxBArea - interArea)
+            if interArea <= 0: return False
+            areaA = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+            areaB = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+            minArea = min(areaA, areaB)
+            if minArea <= 0: return False
+            unionArea = areaA + areaB - interArea
+            iou = interArea / float(unionArea)
+            ioma = interArea / float(minArea) # Intersection over Minimum Area
+            return iou > 0.35 or ioma > 0.45
 
-        PERSON_CONF_THRESHOLD = 0.35
-        CHAIR_CONF_THRESHOLD = 0.15
+        PERSON_CONF_THRESHOLD = 0.30
+        CHAIR_CONF_THRESHOLD = 0.15 # Lower threshold to detect occluded/far chairs (like yellow circle)
         
         if not hasattr(self, '_tracked_chairs_list'):
             self._tracked_chairs_list = []
         
-        # 1. Chairs
-        results_chairs = self._desk_model(frame, classes=[56], conf=CHAIR_CONF_THRESHOLD, imgsz=1280, verbose=False)
+        # 1. Chairs Detection
+        results_chairs = self._desk_model(frame, classes=[56], conf=CHAIR_CONF_THRESHOLD, iou=0.1, imgsz=1280, verbose=False)
         detected_chairs = []
         if results_chairs[0].boxes is not None:
             for box in results_chairs[0].boxes:
-                detected_chairs.append(tuple(map(int, box.xyxy[0])))
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                if (x2 - x1) > 250: # Filter unusually wide boxes (likely two merged chairs)
+                    continue
+                detected_chairs.append((x1, y1, x2, y2))
                 
-        # NMS on detected chairs to prevent internal overlaps
+        # Filter raw detections to eliminate duplicate sub-boxes on the same chair
         filtered_detected_chairs = []
         for d_box in detected_chairs:
             overlap = False
             for f_box in filtered_detected_chairs:
-                if bb_iou(d_box, f_box) > 0.4:
+                if is_duplicate_box(d_box, f_box):
                     overlap = True
                     break
             if not overlap:
                 filtered_detected_chairs.append(d_box)
                 
-        # Update Tracked Chairs using IoU
+        # Update Tracked Chairs
         for tc in self._tracked_chairs_list:
             tc.matched = False
             
         for d_box in filtered_detected_chairs:
-            best_tc, best_iou = None, 0.2
+            best_tc = None
             for tc in self._tracked_chairs_list:
-                iou = bb_iou(d_box, tc.box)
-                if iou > best_iou:
-                    best_iou = iou
+                if is_duplicate_box(d_box, tc.box):
                     best_tc = tc
+                    break
             if best_tc:
                 best_tc.update(d_box)
                 best_tc.matched = True
             else:
                 self._tracked_chairs_list.append(self.TrackedChair(d_box))
                 
+        # Retain active tracked chairs (reducing ghost lifetime to ~1s) and deduplicate active chairs
         active_chairs = []
-        chairs = []
         for tc in self._tracked_chairs_list:
             if not tc.matched: tc.missed_frames += 1
-            if tc.missed_frames < 150: # Remember chairs for ~5 seconds
-                active_chairs.append(tc)
-                chairs.append(tc.box)
+            if tc.missed_frames < 20: # Remember chairs for ~1 second max
+                duplicate = False
+                for existing in active_chairs:
+                    if is_duplicate_box(tc.box, existing.box):
+                        duplicate = True
+                        break
+                if not duplicate:
+                    active_chairs.append(tc)
+                    
         self._tracked_chairs_list = active_chairs
-                
-        # 2. People & Poses
-        results_pose = self._desk_pose_model(frame, conf=PERSON_CONF_THRESHOLD, imgsz=1280, verbose=False)
-        people = [] 
+        chairs = [tc.box for tc in active_chairs]
         
-        if results_pose[0].keypoints is not None and results_pose[0].boxes is not None:
-            for i in range(len(results_pose[0].boxes)):
-                box = results_pose[0].boxes[i]
-                px1, py1, px2, py2 = map(int, box.xyxy[0])
-                center_x, center_y = int((px1 + px2) / 2), int((py1 + py2) / 2)
-                
-                keypoints = results_pose[0].keypoints.data[i]
-                l_shoulder, l_hip, l_knee = keypoints[5], keypoints[11], keypoints[13]
-                r_shoulder, r_hip, r_knee = keypoints[6], keypoints[12], keypoints[14]
-                
-                angle = 180
-                kp_conf = 0.3
-                if l_shoulder[2] > kp_conf and l_hip[2] > kp_conf and l_knee[2] > kp_conf:
-                    angle = calculate_angle(l_shoulder[:2], l_hip[:2], l_knee[:2])
-                elif r_shoulder[2] > kp_conf and r_hip[2] > kp_conf and r_knee[2] > kp_conf:
-                    angle = calculate_angle(r_shoulder[:2], r_hip[:2], r_knee[:2])
-                        
-                is_lying_down = (px2 - px1) > (py2 - py1) * 0.8
-                status = "Sitting" if (is_lying_down or 45 <= angle <= 160) else "Standing"
-                    
-                people.append({
-                    'box': (px1, py1, px2, py2), 'status': status, 'center': (center_x, center_y),
-                    'angle': angle, 'kp': keypoints, 'is_lying': is_lying_down
-                })
-
-        # 3. Determine Occupancy
         occupied_chair_indices = set()
+
+        # 2. Person & Posture detection (Pose model for sitting detection)
         sitting_people = []
-        
-        for p_idx, person in enumerate(people):
-            # INVISIBLE POLYGON (Removed cv2.polylines as requested)
-            if person['status'] == "Sitting":
-                sitting_people.append((p_idx, person))
-                
-        matches = []
-        for p_idx, person in sitting_people:
-            px, py = person['center']
+        if hasattr(self, '_desk_pose_model') and self._desk_pose_model is not None:
+            results_pose = self._desk_pose_model(frame, conf=PERSON_CONF_THRESHOLD, imgsz=1280, verbose=False)
+            
+            if results_pose[0].keypoints is not None and results_pose[0].boxes is not None:
+                for idx in range(len(results_pose[0].boxes)):
+                    box = results_pose[0].boxes[idx]
+                    px1, py1, px2, py2 = map(int, box.xyxy[0])
+                    center_x, center_y = int((px1 + px2) / 2), int((py1 + py2) / 2)
+                    
+                    keypoints = results_pose[0].keypoints.data[idx]
+                    l_shoulder, l_hip, l_knee = keypoints[5], keypoints[11], keypoints[13]
+                    r_shoulder, r_hip, r_knee = keypoints[6], keypoints[12], keypoints[14]
+                    
+                    knees_visible = False
+                    angle = 180
+                    kp_conf = 0.3
+                    if l_shoulder[2] > kp_conf and l_hip[2] > kp_conf and l_knee[2] > kp_conf:
+                        angle = calculate_angle(l_shoulder[:2], l_hip[:2], l_knee[:2])
+                        knees_visible = True
+                    elif r_shoulder[2] > kp_conf and r_hip[2] > kp_conf and r_knee[2] > kp_conf:
+                        angle = calculate_angle(r_shoulder[:2], r_hip[:2], r_knee[:2])
+                        knees_visible = True
+                            
+                    is_lying_down = (px2 - px1) > (py2 - py1) * 0.8
+                    
+                    if is_lying_down:
+                        status = "Sitting"
+                    elif knees_visible and 45 <= angle <= 165:
+                        status = "Sitting"
+                    elif not knees_visible and (py2 - py1) < (px2 - px1) * 3.0:
+                        # Fallback: if knees are occluded (e.g., under desk) and bounding box is not extremely tall, assume sitting
+                        status = "Sitting"
+                    else:
+                        status = "Standing"
+                    
+                    # Estimate chest location for chair matching
+                    if l_shoulder[2] > kp_conf and r_shoulder[2] > kp_conf:
+                        chest_x = int((l_shoulder[0] + r_shoulder[0]) / 2)
+                        chest_y = int((l_shoulder[1] + r_shoulder[1]) / 2) + 20
+                    elif l_shoulder[2] > kp_conf:
+                        chest_x, chest_y = int(l_shoulder[0]), int(l_shoulder[1]) + 20
+                    elif r_shoulder[2] > kp_conf:
+                        chest_x, chest_y = int(r_shoulder[0]), int(r_shoulder[1]) + 20
+                    else:
+                        chest_x = center_x
+                        chest_y = int(py1 + 0.3 * (py2 - py1))
+                        
+                    # Get all keypoints for head-to-toe polygon
+                    poly_points = []
+                    for kp_idx in range(17):
+                        if keypoints[kp_idx][2] > 0.3:
+                            poly_points.append([int(keypoints[kp_idx][0]), int(keypoints[kp_idx][1])])
+                    
+                    # Draw polygon structure instead of point marks
+                    box_color = (255, 100, 100) if status == "Sitting" else (100, 255, 255)
+                    if len(poly_points) >= 3:
+                        pts = np.array(poly_points, np.int32).reshape((-1, 1, 2))
+                        hull = cv2.convexHull(pts)
+                        # Draw polygon structure
+                        # cv2.polylines(frame, [hull], isClosed=True, color=box_color, thickness=3)
+                        
+                    label = f"{status} ({int(angle)} deg)"
+                    cv2.putText(frame, label, (px1, py1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+                    
+                    if status == "Sitting":
+                        sitting_people.append({
+                            'box': (px1, py1, px2, py2),
+                            'center': (center_x, center_y),
+                            'chest': (chest_x, chest_y)
+                        })
+
+        # Calculate candidate matching scores between sitting people and chair boxes
+        candidate_matches = []
+        for p_idx, person in enumerate(sitting_people):
             px1, py1, px2, py2 = person['box']
-            person_h = py2 - py1
+            hx, hy = person['chest']
+            p_area = (px2 - px1) * (py2 - py1)
             
             for c_idx, chair_box in enumerate(chairs):
                 cx1, cy1, cx2, cy2 = chair_box
-                chair_h = cy2 - cy1
+                c_area = (cx2 - cx1) * (cy2 - cy1)
                 
-                # Filter out perspective mismatches (e.g. tiny background person vs huge foreground chair)
-                if person_h < chair_h * 0.4:
+                ix1, iy1 = max(px1, cx1), max(py1, cy1)
+                ix2, iy2 = min(px2, cx2), min(py2, cy2)
+                inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                
+                # Check if person's chest is inside chair box (with slight padding)
+                chest_in_chair = (cx1 - 15 <= hx <= cx2 + 15) and (cy1 - 15 <= hy <= cy2 + 25)
+                
+                if inter_area > 0.15 * p_area or inter_area > 0.15 * c_area or chest_in_chair:
+                    iou = inter_area / float(p_area + c_area - inter_area) if (p_area + c_area - inter_area) > 0 else 0
+                    score = iou + (2.5 if chest_in_chair else 0.5)
+                    candidate_matches.append((score, p_idx, c_idx))
+
+        # Greedy 1-to-1 assignment: 1 sitting person occupies at most 1 chair
+        candidate_matches.sort(key=lambda x: x[0], reverse=True)
+        assigned_persons = set()
+        assigned_chairs = set()
+        
+        for score, p_idx, c_idx in candidate_matches:
+            if p_idx not in assigned_persons and c_idx not in assigned_chairs:
+                assigned_persons.add(p_idx)
+                assigned_chairs.add(c_idx)
+                occupied_chair_indices.add(c_idx)
+        # Artificially create chairs for sitting people who missed chair detection
+        for p_idx, person in enumerate(sitting_people):
+            if p_idx not in assigned_persons:
+                px1, py1, px2, py2 = person['box']
+                cx1 = px1 - 15
+                cy1 = py1 + int((py2 - py1) * 0.3)
+                cx2 = px2 + 15
+                cy2 = py2 + 20
+                
+                chairs.append((cx1, cy1, cx2, cy2))
+                occupied_chair_indices.add(len(chairs) - 1)
+
+        # 3. AI Classifier signal (for remaining unassigned chairs)
+        if hasattr(self, '_chair_classifier') and self._chair_classifier is not None:
+            h, w = frame.shape[:2]
+            for i, chair_box in enumerate(chairs):
+                if i in occupied_chair_indices:
+                    continue # already marked occupied by a sitting person
+                cx1, cy1, cx2, cy2 = chair_box
+                cx1, cy1 = max(0, cx1), max(0, cy1)
+                cx2, cy2 = min(w, cx2), min(h, cy2)
+                if cx2 - cx1 < 10 or cy2 - cy1 < 10:
                     continue
-                
-                ix1, iy1 = max(px1, cx1), max(py1, cy1)
-                ix2, iy2 = min(px2, cx2), min(py2, cy2)
-                inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-                
-                person_area = (px2 - px1) * person_h
-                chair_area = (cx2 - cx1) * chair_h
-                
-                # Check hips
-                kp = person['kp']
-                l_hip, r_hip = kp[11], kp[12]
-                hips_in_chair, valid_hips, hip_y_avg = False, 0, 0
-                
-                if l_hip[2] > 0.3:
-                    valid_hips += 1; hip_y_avg += l_hip[1]
-                    if point_in_box(l_hip[:2], chair_box, padding=20): hips_in_chair = True
-                if r_hip[2] > 0.3:
-                    valid_hips += 1; hip_y_avg += r_hip[1]
-                    if point_in_box(r_hip[:2], chair_box, padding=20): hips_in_chair = True
-                    
-                hip_y_avg = (hip_y_avg / valid_hips) if valid_hips > 0 else py
-                
-                # Instead of overlapping with the min area, demand it overlaps with the person's area
-                # to prevent tiny background people from fulfilling this accidentally
-                is_overlapping = inter_area > 0.30 * person_area
-                
-                if hips_in_chair or is_overlapping:
-                    chair_center_x = (cx1 + cx2) // 2
-                    chair_center_y = (cy1 + cy2) // 2
-                    dist = math.hypot(px - chair_center_x, hip_y_avg - chair_center_y)
-                    matches.append({'p_idx': p_idx, 'c_idx': c_idx, 'cost': dist + abs(person_h - chair_h) * 0.5})
-                    
-        matches = []
-        for p_idx, person in sitting_people:
-            px, py = person['center']
-            px1, py1, px2, py2 = person['box']
-            person_h = py2 - py1
-            
-            for c_idx, chair_box in enumerate(chairs):
-                cx1, cy1, cx2, cy2 = chair_box
-                
-                ix1, iy1 = max(px1, cx1), max(py1, cy1)
-                ix2, iy2 = min(px2, cx2), min(py2, cy2)
-                inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-                
-                person_area, chair_h = (px2 - px1) * person_h, cy2 - cy1
-                chair_area = (cx2 - cx1) * chair_h
-                
-                # Check hips
-                kp = person['kp']
-                l_hip, r_hip = kp[11], kp[12]
-                hips_in_chair, valid_hips, hip_y_avg = False, 0, 0
-                
-                if l_hip[2] > 0.3:
-                    valid_hips += 1; hip_y_avg += l_hip[1]
-                    if point_in_box(l_hip[:2], chair_box, padding=20): hips_in_chair = True
-                if r_hip[2] > 0.3:
-                    valid_hips += 1; hip_y_avg += r_hip[1]
-                    if point_in_box(r_hip[:2], chair_box, padding=20): hips_in_chair = True
-                    
-                hip_y_avg = (hip_y_avg / valid_hips) if valid_hips > 0 else py
-                
-                is_overlapping = inter_area > 0.30 * min(person_area, chair_area)
-                
-                if hips_in_chair or is_overlapping:
-                    chair_center_x = (cx1 + cx2) // 2
-                    chair_center_y = (cy1 + cy2) // 2
-                    dist = math.hypot(px - chair_center_x, hip_y_avg - chair_center_y)
-                    matches.append({'p_idx': p_idx, 'c_idx': c_idx, 'cost': dist + abs(person_h - chair_h) * 0.5})
-                    
-        matches.sort(key=lambda x: x['cost'])
-        matched_people = set()
-        
-        for match in matches:
-            if match['p_idx'] not in matched_people and match['c_idx'] not in occupied_chair_indices:
-                matched_people.add(match['p_idx'])
-                occupied_chair_indices.add(match['c_idx'])
-                self._tracked_chairs_list[match['c_idx']].missed_frames = 0
-            
+                chair_crop = frame[cy1:cy2, cx1:cx2]
+                cls_results = self._chair_classifier(chair_crop, imgsz=224, verbose=False)
+                if cls_results and cls_results[0].probs is not None:
+                    probs = cls_results[0].probs
+                    predicted_class = cls_results[0].names[probs.top1]
+                    confidence = probs.top1conf.item()
+                    if predicted_class == 'occupied' and confidence > 0.70:
+                        occupied_chair_indices.add(i)
+
+
+        # 4. Draw chairs with occupancy status
         for i, chair_box in enumerate(chairs):
             cx1, cy1, cx2, cy2 = chair_box
             is_occupied = (i in occupied_chair_indices)
@@ -1732,7 +1765,43 @@ class CameraWorker:
             
         return out_frame
 
+    def _process_room(self, frame):
+        self._ensure_models_loaded()
+        
+        # Use the standard loaded YOLO model with lower IoU to prevent double detections
+        results = self._yolo(frame, classes=[PERSON_CLASS], iou=0.3, verbose=False)
+        
+        people_count = 0
+        if results[0].boxes is not None:
+            boxes = results[0].boxes.xyxy.cpu()
+            confidences = results[0].boxes.conf.cpu()
+            
+            for box, conf in zip(boxes, confidences):
+                if conf < 0.4:
+                    continue
+                    
+                people_count += 1
+                x1, y1, x2, y2 = map(int, box)
+                
+                # Calculate chest position (approx 30% down from top of bounding box)
+                chest_x = int((x1 + x2) / 2)
+                chest_y = int(y1 + (y2 - y1) * 0.3)
+                
+                # Calculate head position (approx 5% down from top)
+                head_x = chest_x
+                head_y = int(y1 + (y2 - y1) * 0.05)
+                
+                # Draw chest point
+                cv2.circle(frame, (chest_x, chest_y), 8, (0, 255, 0), -1)
+                cv2.circle(frame, (chest_x, chest_y), 4, (255, 255, 255), -1)
+                
+                # Draw small white point on head
+                cv2.circle(frame, (head_x, head_y), 3, (255, 255, 255), -1)
 
-
+        # Display total count
+        cv2.rectangle(frame, (10, 10), (450, 80), (0, 0, 0), -1)
+        cv2.putText(frame, f"Active Persons in Room: {people_count}", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+        
+        return frame
 # Single shared instance used by the Flask app
 worker = CameraWorker()

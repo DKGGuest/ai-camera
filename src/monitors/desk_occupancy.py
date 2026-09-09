@@ -51,19 +51,18 @@ class TrackedChair:
         self.matched = True
         
     def update(self, box):
-        # Update center with smoothing (fast response)
+        # Update center with smoothing
         new_cx = (box[0] + box[2]) / 2.0
         new_cy = (box[1] + box[3]) / 2.0
-        self.cx = self.cx * 0.5 + new_cx * 0.5
-        self.cy = self.cy * 0.5 + new_cy * 0.5
+        self.cx = self.cx * 0.7 + new_cx * 0.3
+        self.cy = self.cy * 0.7 + new_cy * 0.3
         
-        # Prevent shrinking: only grow or stay the same
         new_w = box[2] - box[0]
         new_h = box[3] - box[1]
         
-        # Allow very slight shrinking over time to recover from false massive boxes
-        self.w = max(new_w, self.w * 0.995) 
-        self.h = max(new_h, self.h * 0.995)
+        # Smooth width and height (allow shrinking and growing equally to prevent bloated overlapping boxes)
+        self.w = self.w * 0.7 + new_w * 0.3
+        self.h = self.h * 0.7 + new_h * 0.3
         
         self.box = (
             int(self.cx - self.w/2),
@@ -71,6 +70,35 @@ class TrackedChair:
             int(self.cx + self.w/2),
             int(self.cy + self.h/2)
         )
+        self.missed_frames = 0
+
+class TrackedPerson:
+    def __init__(self, box, status):
+        self.box = box
+        self.cx = (box[0] + box[2]) / 2.0
+        self.cy = (box[1] + box[3]) / 2.0
+        self.status_history = [status]
+        self.status = status
+        self.missed_frames = 0
+        self.matched = True
+        
+    def update(self, box, raw_status):
+        self.cx = (box[0] + box[2]) / 2.0
+        self.cy = (box[1] + box[3]) / 2.0
+        self.box = box
+        
+        # Keep history of last 15 frames for stable output
+        self.status_history.append(raw_status)
+        if len(self.status_history) > 15:
+            self.status_history.pop(0)
+            
+        # Majority vote
+        sitting_count = self.status_history.count("Sitting")
+        if sitting_count > len(self.status_history) / 2:
+            self.status = "Sitting"
+        else:
+            self.status = "Standing"
+            
         self.missed_frames = 0
 
 def main():
@@ -81,7 +109,7 @@ def main():
     rtsp_url = 'YOUR_RTSP_URL_HERE'
     
     PERSON_CONF_THRESHOLD = 0.35
-    CHAIR_CONF_THRESHOLD = 0.15 # Lower threshold to detect chairs occluded by people
+    CHAIR_CONF_THRESHOLD = 0.05 # Lower threshold to detect heavily occluded/missed chairs
     CHAIR_PADDING = 60
 
     cap = get_video_stream(rtsp_url)
@@ -91,6 +119,7 @@ def main():
     print("Starting video processing. Press 'q' to quit.")
 
     tracked_chairs = []
+    tracked_people = []
 
     while True:
         ret, frame = cap.read()
@@ -103,11 +132,13 @@ def main():
             continue
             
         # 1. Run inference for chairs (Standard YOLO)
-        results_chairs = model_chairs(frame, classes=[56], conf=CHAIR_CONF_THRESHOLD, imgsz=1280, verbose=False)
+        results_chairs = model_chairs(frame, classes=[56], conf=CHAIR_CONF_THRESHOLD, iou=0.1, imgsz=1280, verbose=False)
         detected_chairs = []
         if results_chairs[0].boxes is not None:
             for box in results_chairs[0].boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
+                if (x2 - x1) > 250: # Filter unusually wide boxes (likely two merged chairs)
+                    continue
                 detected_chairs.append((x1, y1, x2, y2))
                 
         # Update Tracked Chairs to prevent shrinking
@@ -166,42 +197,81 @@ def main():
                 l_shoulder, l_hip, l_knee = keypoints[5], keypoints[11], keypoints[13]
                 r_shoulder, r_hip, r_knee = keypoints[6], keypoints[12], keypoints[14]
                 
+                knees_visible = False
+                
                 # Calculate angle using the side that is most visible
                 if l_shoulder[2] > kp_conf_threshold and l_hip[2] > kp_conf_threshold and l_knee[2] > kp_conf_threshold:
                     angle = calculate_angle(l_shoulder[:2], l_hip[:2], l_knee[:2])
+                    knees_visible = True
                 elif r_shoulder[2] > kp_conf_threshold and r_hip[2] > kp_conf_threshold and r_knee[2] > kp_conf_threshold:
                     angle = calculate_angle(r_shoulder[:2], r_hip[:2], r_knee[:2])
+                    knees_visible = True
                         
                 # Determine posture:
-                # If bounding box is wide (lying down or leaning far over), ALWAYS mark as sitting
                 is_lying_down = (x2 - x1) > (y2 - y1) * 0.8
                 
                 if is_lying_down:
-                    status = "Sitting"
-                elif 45 <= angle <= 140:
-                    status = "Sitting"
+                    raw_status = "Sitting"
+                elif knees_visible and 45 <= angle <= 165:
+                    raw_status = "Sitting"
+                elif not knees_visible and (y2 - y1) < (x2 - x1) * 2.2:
+                    # Fallback: if knees are occluded (e.g., under desk) and bounding box is relatively square, assume sitting
+                    raw_status = "Sitting"
                 else:
-                    status = "Standing"
+                    raw_status = "Standing"
                     
                 people.append({
                     'box': (x1, y1, x2, y2),
-                    'status': status,
+                    'raw_status': raw_status,
                     'center': (center_x, center_y),
                     'angle': angle,
                     'kp': keypoints,
                     'is_lying': is_lying_down
                 })
 
+        # Apply temporal smoothing to people to prevent flickering
+        for tp in tracked_people:
+            tp.matched = False
+            
+        for p in people:
+            px, py = p['center']
+            best_tp = None
+            best_dist = 100
+            
+            for tp in tracked_people:
+                dist = math.hypot(px - tp.cx, py - tp.cy)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_tp = tp
+                    
+            if best_tp is not None:
+                best_tp.update(p['box'], p['raw_status'])
+                best_tp.matched = True
+                p['status'] = best_tp.status # Assign the smoothed status back
+            else:
+                new_tp = TrackedPerson(p['box'], p['raw_status'])
+                tracked_people.append(new_tp)
+                p['status'] = new_tp.status
+                
+        # Clean up lost people
+        active_people = []
+        for tp in tracked_people:
+            if not tp.matched:
+                tp.missed_frames += 1
+            if tp.missed_frames < 30:
+                active_people.append(tp)
+        tracked_people = active_people
+
         # 3. Determine occupancy: ONLY Sitting people can occupy a chair
         occupied_chair_indices = set()
         
-        # Draw people and collect sitting people for matching
-        sitting_people = []
+        # Draw people and collect them for matching
+        candidate_people = []
         for p_idx, person in enumerate(people):
-            # Define polygon points (Left Shoulder, Right Shoulder, Right Hip, Right Knee, Left Knee, Left Hip)
+            # Define polygon points using all visible keypoints (head to toe)
             poly_points = []
             kp = person['kp']
-            for kp_idx in [5, 6, 12, 14, 13, 11]:
+            for kp_idx in range(17):
                 if kp[kp_idx][2] > 0.3:
                     poly_points.append([int(kp[kp_idx][0]), int(kp[kp_idx][1])])
             
@@ -210,7 +280,8 @@ def main():
             
             if len(poly_points) >= 3:
                 pts = np.array(poly_points, np.int32).reshape((-1, 1, 2))
-                cv2.polylines(frame, [pts], isClosed=True, color=box_color, thickness=3)
+                hull = cv2.convexHull(pts)
+                # cv2.polylines(frame, [hull], isClosed=True, color=box_color, thickness=3)
             
             label = f"{person['status']} ({int(person['angle'])} deg)"
             if person['is_lying']: label += " [Lying]"
@@ -219,11 +290,11 @@ def main():
                         (person['box'][0], person['box'][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
             
             if person['status'] == "Sitting":
-                sitting_people.append((p_idx, person))
+                candidate_people.append((p_idx, person))
                 
-        # Calculate matching costs between sitting people and chairs
+        # Calculate matching costs between people and chairs
         matches = []
-        for p_idx, person in sitting_people:
+        for p_idx, person in candidate_people:
             px, py = person['center']
             px1, py1, px2, py2 = person['box']
             person_h = py2 - py1
@@ -263,10 +334,16 @@ def main():
                 else:
                     hip_y_avg = py # Fallback to center Y if hips aren't visible
                 
-                # Require either hips to be inside the chair, OR a very strong bounding box overlap (IoM > 30%)
-                is_overlapping = inter_area > 0.30 * min(person_area, chair_area)
+                # Require either hips to be inside the chair, OR a very strong bounding box overlap (IoM > 50%)
+                is_overlapping = inter_area > 0.50 * min(person_area, chair_area)
                 
-                if hips_in_chair or is_overlapping:
+                # If hips are visible, we trust them. If not visible, we fall back to bounding box overlap.
+                if valid_hips > 0:
+                    valid_occupancy = hips_in_chair
+                else:
+                    valid_occupancy = is_overlapping
+                
+                if valid_occupancy:
                     chair_center_x = (cx1 + cx2) // 2
                     chair_center_y = (cy1 + cy2) // 2
                     

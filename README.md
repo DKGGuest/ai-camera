@@ -25,6 +25,8 @@ This platform bridges the gap between raw camera streams and actionable business
 | 📦 | **Box Loading Tracker** | Specialized YOLO tracker for inventory management. Users draw 4 points (2 lines) to create a directional threshold that logs when cardboard boxes are "Loaded" or "Unloaded". |
 | 🏭 | **Worker Tracker** | Advanced productivity monitor. Tracks individuals and cross-references their face orientation, proximity to laptops, and cell phone usage to determine if they are "Working", "Using Phone", "Talking", or "Idle". Provides a live productivity percentage HUD. |
 | 🧍‍♂️ | **Queue Monitor** | Allows users to draw up to 5 custom polygon zones on the camera feed. Continuously monitors the number of people inside each zone and issues alerts for long wait times. |
+| 🪑 | **Desk Occupancy** | Detects desks/chairs and people simultaneously. Accurately maps sitting individuals to specific chairs, artificially tracking occluded chairs. Displays green/red boxes for Empty/Occupied statuses. |
+| 👥 | **Room Occupancy** | Monitors the overall active occupancy of a room. Detects people and marks their chest points, keeping a live count of total individuals present without drawing invasive bounding boxes. |
 | ⚡ | **Adaptive Bitrate** | Privacy & bandwidth preservation mode. Drops stream resolution and bitrate to ultra-low when the scene is empty. Instantly switches to high-fidelity processing when a person is detected. |
 
 ---
