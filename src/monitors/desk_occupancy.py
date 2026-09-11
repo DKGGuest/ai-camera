@@ -109,7 +109,7 @@ def main():
     rtsp_url = 'YOUR_RTSP_URL_HERE'
     
     PERSON_CONF_THRESHOLD = 0.35
-    CHAIR_CONF_THRESHOLD = 0.05 # Lower threshold to detect heavily occluded/missed chairs
+    CHAIR_CONF_THRESHOLD = 0.08 # Lowered threshold to detect far chairs, relying on strict NMS
     CHAIR_PADDING = 60
 
     cap = get_video_stream(rtsp_url)
@@ -131,15 +131,86 @@ def main():
                 cap = get_video_stream(rtsp_url)
             continue
             
+        def is_duplicate_box(boxA, boxB):
+            # Proportional distance check to merge fragmented/adjacent bounding boxes for the same chair/person
+            cA_x, cA_y = (boxA[0]+boxA[2])/2, (boxA[1]+boxA[3])/2
+            cB_x, cB_y = (boxB[0]+boxB[2])/2, (boxB[1]+boxB[3])/2
+            dx = abs(cA_x - cB_x)
+            dy = abs(cA_y - cB_y)
+            
+            wA, hA = boxA[2] - boxA[0], boxA[3] - boxA[1]
+            wB, hB = boxB[2] - boxB[0], boxB[3] - boxB[1]
+            areaA = wA * hA
+            areaB = wB * hB
+            minArea = min(areaA, areaB)
+            
+            avg_w = (wA + wB) / 2.0
+            avg_h = (hA + hB) / 2.0
+            
+            xA = max(boxA[0], boxB[0])
+            yA = max(boxA[1], boxB[1])
+            xB = min(boxA[2], boxB[2])
+            yB = min(boxA[3], boxB[3])
+            interArea = max(0, xB - xA) * max(0, yB - yA)
+            
+            if minArea <= 0: return False
+            ioma = interArea / float(minArea) # Intersection over Minimum Area
+            iou = interArea / float(areaA + areaB - interArea)
+            
+            # If the smaller box is mostly inside the larger box, it's a fragment (e.g. backrest, handle)
+            if ioma > 0.4:
+                return True
+                
+            # If centers are very close horizontally and vertically, they belong to the same chair
+            if dx < avg_w * 0.25 and dy < avg_h * 0.4:
+                return True
+                
+            # For similarly sized boxes, check standard IoU
+            return iou > 0.55
+
         # 1. Run inference for chairs (Standard YOLO)
-        results_chairs = model_chairs(frame, classes=[56], conf=CHAIR_CONF_THRESHOLD, iou=0.1, imgsz=1280, verbose=False)
-        detected_chairs = []
+        # Increased IoU from 0.45 to 0.60 so adjacent/overlapping chairs in the back aren't deleted by YOLO NMS
+        results_chairs = model_chairs(frame, classes=[56], conf=CHAIR_CONF_THRESHOLD, iou=0.60, imgsz=1280, verbose=False)
+        raw_detected_chairs = []
         if results_chairs[0].boxes is not None:
             for box in results_chairs[0].boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                if (x2 - x1) > 250: # Filter unusually wide boxes (likely two merged chairs)
+                w, h = (x2 - x1), (y2 - y1)
+                
+                if w > 300: # Filter unusually wide boxes (likely two merged chairs)
                     continue
-                detected_chairs.append((x1, y1, x2, y2))
+                    
+                raw_detected_chairs.append((x1, y1, x2, y2))
+                
+        # Sort by area descending so we keep the largest box (the full chair) and filter out the smaller fragments
+        raw_detected_chairs.sort(key=lambda b: (b[2]-b[0])*(b[3]-b[1]), reverse=True)
+                
+        # Filter raw detections to eliminate duplicate sub-boxes on the same chair
+        filtered_detected_chairs = []
+        for d_box in raw_detected_chairs:
+            overlap = False
+            for f_box in filtered_detected_chairs:
+                if is_duplicate_box(d_box, f_box):
+                    overlap = True
+                    break
+            if not overlap:
+                filtered_detected_chairs.append(d_box)
+
+        detected_chairs = []
+        for (x1, y1, x2, y2) in filtered_detected_chairs:
+            # Shrink chair bounding box area by ~50% to tighten around the chair
+            w = x2 - x1
+            h = y2 - y1
+            cx = x1 + w // 2
+            cy = y1 + h // 2
+            new_w = int(w * 0.75)
+            new_h = int(h * 0.75)
+            nx1 = cx - new_w // 2
+            nx2 = cx + new_w // 2
+            ny1 = cy - new_h // 2
+            ny2 = cy + new_h // 2
+            
+            detected_chairs.append((nx1, ny1, nx2, ny2))
                 
         # Update Tracked Chairs to prevent shrinking
         for tc in tracked_chairs:
@@ -182,7 +253,20 @@ def main():
         people = [] 
         
         if results_pose[0].keypoints is not None and results_pose[0].boxes is not None:
+            # Pre-filter duplicate people detections
+            valid_pose_indices = []
             for i in range(len(results_pose[0].boxes)):
+                boxA = list(map(int, results_pose[0].boxes[i].xyxy[0]))
+                overlap = False
+                for j in valid_pose_indices:
+                    boxB = list(map(int, results_pose[0].boxes[j].xyxy[0]))
+                    if is_duplicate_box(boxA, boxB):
+                        overlap = True
+                        break
+                if not overlap:
+                    valid_pose_indices.append(i)
+                    
+            for i in valid_pose_indices:
                 box = results_pose[0].boxes[i]
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 center_x = int((x1 + x2) / 2)
@@ -210,7 +294,28 @@ def main():
                 # Determine posture:
                 is_lying_down = (x2 - x1) > (y2 - y1) * 0.8
                 
+                # Human-like logic: check if the person's hips are inside any tracked chair
+                hips_in_chair = False
+                hip_y = -1
+                if l_hip[2] > 0.3 and r_hip[2] > 0.3:
+                    hip_y = (l_hip[1] + r_hip[1]) / 2
+                    hip_x = (l_hip[0] + r_hip[0]) / 2
+                elif l_hip[2] > 0.3:
+                    hip_y, hip_x = l_hip[1], l_hip[0]
+                elif r_hip[2] > 0.3:
+                    hip_y, hip_x = r_hip[1], r_hip[0]
+                    
+                if hip_y != -1:
+                    for c_box in chairs:
+                        cx1, cy1, cx2, cy2 = c_box
+                        # Check if hip is within the chair box (with some padding)
+                        if (cx1 - 20) < hip_x < (cx2 + 20) and (cy1 - 20) < hip_y < (cy2 + 20):
+                            hips_in_chair = True
+                            break
+                
                 if is_lying_down:
+                    raw_status = "Sitting"
+                elif hips_in_chair:
                     raw_status = "Sitting"
                 elif knees_visible and 45 <= angle <= 165:
                     raw_status = "Sitting"
@@ -262,7 +367,7 @@ def main():
                 active_people.append(tp)
         tracked_people = active_people
 
-        # 3. Determine occupancy: ONLY Sitting people can occupy a chair
+        # 3. Determine occupancy: Sitting or Standing people can occupy a desk
         occupied_chair_indices = set()
         
         # Draw people and collect them for matching
@@ -292,77 +397,46 @@ def main():
             if person['status'] == "Sitting":
                 candidate_people.append((p_idx, person))
                 
-        # Calculate matching costs between people and chairs
+        # Calculate matching based on intersection area (major portion of person in chair)
         matches = []
         for p_idx, person in candidate_people:
-            px, py = person['center']
             px1, py1, px2, py2 = person['box']
-            person_h = py2 - py1
+            person_area = (px2 - px1) * (py2 - py1)
             
             for c_idx, chair_box in enumerate(chairs):
                 cx1, cy1, cx2, cy2 = chair_box
+                chair_area = (cx2 - cx1) * (cy2 - cy1)
                 
                 # Check bounding box intersection
                 ix1 = max(px1, cx1)
                 iy1 = max(py1, cy1)
                 ix2 = min(px2, cx2)
                 iy2 = min(py2, cy2)
-                inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
                 
-                person_area = (px2 - px1) * person_h
-                chair_h = cy2 - cy1
-                chair_area = (cx2 - cx1) * chair_h
-                
-                # Extract hip keypoints to see if they fall inside the chair (best indicator of sitting ON it)
-                kp = person['kp']
-                l_hip, r_hip = kp[11], kp[12]
-                hips_in_chair = False
-                valid_hips = 0
-                hip_y_avg = 0
-                
-                if l_hip[2] > 0.3:
-                    valid_hips += 1
-                    hip_y_avg += l_hip[1]
-                    if point_in_box(l_hip[:2], chair_box, padding=20): hips_in_chair = True
-                if r_hip[2] > 0.3:
-                    valid_hips += 1
-                    hip_y_avg += r_hip[1]
-                    if point_in_box(r_hip[:2], chair_box, padding=20): hips_in_chair = True
+                if ix1 < ix2 and iy1 < iy2:
+                    inter_area = (ix2 - ix1) * (iy2 - iy1)
                     
-                if valid_hips > 0:
-                    hip_y_avg /= valid_hips
-                else:
-                    hip_y_avg = py # Fallback to center Y if hips aren't visible
-                
-                # Require either hips to be inside the chair, OR a very strong bounding box overlap (IoM > 50%)
-                is_overlapping = inter_area > 0.50 * min(person_area, chair_area)
-                
-                # If hips are visible, we trust them. If not visible, we fall back to bounding box overlap.
-                if valid_hips > 0:
-                    valid_occupancy = hips_in_chair
-                else:
-                    valid_occupancy = is_overlapping
-                
-                if valid_occupancy:
-                    chair_center_x = (cx1 + cx2) // 2
-                    chair_center_y = (cy1 + cy2) // 2
+                    # Consider it a match candidate if overlap is substantial
+                    if inter_area > 0.15 * min(person_area, chair_area):
+                        iou = inter_area / float(person_area + chair_area - inter_area)
+                        
+                        # Distance between centers
+                        pcx = (px1 + px2) / 2
+                        pcy = (py1 + py2) / 2
+                        ccx = (cx1 + cx2) / 2
+                        ccy = (cy1 + cy2) / 2
+                        dist = math.hypot(pcx - ccx, pcy - ccy)
+                        
+                        matches.append({
+                            'p_idx': p_idx,
+                            'c_idx': c_idx,
+                            'inter_area': inter_area,
+                            'iou': iou,
+                            'dist': dist
+                        })
                     
-                    # 2D Euclidean distance (use hip Y for vertical distance as it's more accurate for sitting)
-                    dist = math.hypot(px - chair_center_x, hip_y_avg - chair_center_y)
-                    
-                    scale_diff = abs(person_h - chair_h)
-                    
-                    # Combine into a single cost metric
-                    cost = dist + scale_diff * 0.5
-                    
-                    matches.append({
-                        'p_idx': p_idx,
-                        'c_idx': c_idx,
-                        'cost': cost
-                    })
-                    
-        # Sort matches by lowest cost (best match first)
-        matches.sort(key=lambda x: x['cost'])
+        # Sort matches by HIGHEST IoU, then lowest distance
+        matches.sort(key=lambda x: (x['iou'], -x['dist']), reverse=True)
         
         matched_people = set()
         

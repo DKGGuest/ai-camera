@@ -544,6 +544,16 @@ class CameraWorker:
             return math.degrees(angle_rad)
 
         def is_duplicate_box(boxA, boxB):
+            # Proportional distance check to merge fragmented/adjacent bounding boxes for the same chair/person
+            cA_x, cA_y = (boxA[0]+boxA[2])/2, (boxA[1]+boxA[3])/2
+            cB_x, cB_y = (boxB[0]+boxB[2])/2, (boxB[1]+boxB[3])/2
+            dx = abs(cA_x - cB_x)
+            dy = abs(cA_y - cB_y)
+            avg_w = (boxA[2] - boxA[0] + boxB[2] - boxB[0]) / 2.0
+            avg_h = (boxA[3] - boxA[1] + boxB[3] - boxB[1]) / 2.0
+            if dx < avg_w * 0.4 and dy < avg_h * 1.0:
+                return True
+                
             xA = max(boxA[0], boxB[0])
             yA = max(boxA[1], boxB[1])
             xB = min(boxA[2], boxB[2])
@@ -560,24 +570,29 @@ class CameraWorker:
             return iou > 0.35 or ioma > 0.45
 
         PERSON_CONF_THRESHOLD = 0.30
-        CHAIR_CONF_THRESHOLD = 0.15 # Lower threshold to detect occluded/far chairs (like yellow circle)
+        CHAIR_CONF_THRESHOLD = 0.08 # Lowered threshold to detect far chairs, relying on strict NMS
         
         if not hasattr(self, '_tracked_chairs_list'):
             self._tracked_chairs_list = []
         
         # 1. Chairs Detection
-        results_chairs = self._desk_model(frame, classes=[56], conf=CHAIR_CONF_THRESHOLD, iou=0.1, imgsz=1280, verbose=False)
-        detected_chairs = []
+        # Increased IoU from 0.1 to 0.45 so adjacent/overlapping chairs in the back aren't deleted by YOLO NMS
+        results_chairs = self._desk_model(frame, classes=[56], conf=CHAIR_CONF_THRESHOLD, iou=0.45, imgsz=1280, verbose=False)
+        raw_detected_chairs = []
         if results_chairs[0].boxes is not None:
             for box in results_chairs[0].boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                if (x2 - x1) > 250: # Filter unusually wide boxes (likely two merged chairs)
+                w, h = (x2 - x1), (y2 - y1)
+                
+                if w > 300: # Filter unusually wide boxes (likely two merged chairs)
                     continue
-                detected_chairs.append((x1, y1, x2, y2))
+                    
+                # Removed strict height/width filters that were deleting the distant chairs
+                raw_detected_chairs.append((x1, y1, x2, y2))
                 
         # Filter raw detections to eliminate duplicate sub-boxes on the same chair
         filtered_detected_chairs = []
-        for d_box in detected_chairs:
+        for d_box in raw_detected_chairs:
             overlap = False
             for f_box in filtered_detected_chairs:
                 if is_duplicate_box(d_box, f_box):
@@ -585,6 +600,22 @@ class CameraWorker:
                     break
             if not overlap:
                 filtered_detected_chairs.append(d_box)
+
+        detected_chairs = []
+        for (x1, y1, x2, y2) in filtered_detected_chairs:
+            # Shrink chair bounding box area by ~50% to tighten around the chair
+            w = x2 - x1
+            h = y2 - y1
+            cx = x1 + w // 2
+            cy = y1 + h // 2
+            new_w = int(w * 0.75)
+            new_h = int(h * 0.75)
+            nx1 = cx - new_w // 2
+            nx2 = cx + new_w // 2
+            ny1 = cy - new_h // 2
+            ny2 = cy + new_h // 2
+            
+            detected_chairs.append((nx1, ny1, nx2, ny2))
                 
         # Update Tracked Chairs
         for tc in self._tracked_chairs_list:
@@ -626,7 +657,20 @@ class CameraWorker:
             results_pose = self._desk_pose_model(frame, conf=PERSON_CONF_THRESHOLD, imgsz=1280, verbose=False)
             
             if results_pose[0].keypoints is not None and results_pose[0].boxes is not None:
-                for idx in range(len(results_pose[0].boxes)):
+                # Pre-filter duplicate people detections
+                valid_pose_indices = []
+                for i in range(len(results_pose[0].boxes)):
+                    boxA = list(map(int, results_pose[0].boxes[i].xyxy[0]))
+                    overlap = False
+                    for j in valid_pose_indices:
+                        boxB = list(map(int, results_pose[0].boxes[j].xyxy[0]))
+                        if is_duplicate_box(boxA, boxB):
+                            overlap = True
+                            break
+                    if not overlap:
+                        valid_pose_indices.append(i)
+                
+                for idx in valid_pose_indices:
                     box = results_pose[0].boxes[idx]
                     px1, py1, px2, py2 = map(int, box.xyxy[0])
                     center_x, center_y = int((px1 + px2) / 2), int((py1 + py2) / 2)
@@ -690,7 +734,8 @@ class CameraWorker:
                         sitting_people.append({
                             'box': (px1, py1, px2, py2),
                             'center': (center_x, center_y),
-                            'chest': (chest_x, chest_y)
+                            'chest': (chest_x, chest_y),
+                            'status': status
                         })
 
         # Calculate candidate matching scores between sitting people and chair boxes
@@ -711,9 +756,18 @@ class CameraWorker:
                 # Check if person's chest is inside chair box (with slight padding)
                 chest_in_chair = (cx1 - 15 <= hx <= cx2 + 15) and (cy1 - 15 <= hy <= cy2 + 25)
                 
-                if inter_area > 0.15 * p_area or inter_area > 0.15 * c_area or chest_in_chair:
+                if inter_area > 0.10 * p_area or inter_area > 0.10 * c_area or chest_in_chair:
                     iou = inter_area / float(p_area + c_area - inter_area) if (p_area + c_area - inter_area) > 0 else 0
-                    score = iou + (2.5 if chest_in_chair else 0.5)
+                    
+                    # Distance between centers
+                    pcx = (px1 + px2) / 2
+                    pcy = (py1 + py2) / 2
+                    ccx = (cx1 + cx2) / 2
+                    ccy = (cy1 + cy2) / 2
+                    dist = math.hypot(pcx - ccx, pcy - ccy)
+                    
+                    # Score strongly favors closer distance and chest inclusion
+                    score = (iou * 100) - dist + (100 if chest_in_chair else 0)
                     candidate_matches.append((score, p_idx, c_idx))
 
         # Greedy 1-to-1 assignment: 1 sitting person occupies at most 1 chair
@@ -738,25 +792,25 @@ class CameraWorker:
                 chairs.append((cx1, cy1, cx2, cy2))
                 occupied_chair_indices.add(len(chairs) - 1)
 
-        # 3. AI Classifier signal (for remaining unassigned chairs)
-        if hasattr(self, '_chair_classifier') and self._chair_classifier is not None:
-            h, w = frame.shape[:2]
-            for i, chair_box in enumerate(chairs):
-                if i in occupied_chair_indices:
-                    continue # already marked occupied by a sitting person
-                cx1, cy1, cx2, cy2 = chair_box
-                cx1, cy1 = max(0, cx1), max(0, cy1)
-                cx2, cy2 = min(w, cx2), min(h, cy2)
-                if cx2 - cx1 < 10 or cy2 - cy1 < 10:
-                    continue
-                chair_crop = frame[cy1:cy2, cx1:cx2]
-                cls_results = self._chair_classifier(chair_crop, imgsz=224, verbose=False)
-                if cls_results and cls_results[0].probs is not None:
-                    probs = cls_results[0].probs
-                    predicted_class = cls_results[0].names[probs.top1]
-                    confidence = probs.top1conf.item()
-                    if predicted_class == 'occupied' and confidence > 0.70:
-                        occupied_chair_indices.add(i)
+        # 3. AI Classifier signal (for remaining unassigned chairs) - DISABLED to prevent false positives from objects like backpacks
+        # if hasattr(self, '_chair_classifier') and self._chair_classifier is not None:
+        #     h, w = frame.shape[:2]
+        #     for i, chair_box in enumerate(chairs):
+        #         if i in occupied_chair_indices:
+        #             continue # already marked occupied by a sitting person
+        #         cx1, cy1, cx2, cy2 = chair_box
+        #         cx1, cy1 = max(0, cx1), max(0, cy1)
+        #         cx2, cy2 = min(w, cx2), min(h, cy2)
+        #         if cx2 - cx1 < 10 or cy2 - cy1 < 10:
+        #             continue
+        #         chair_crop = frame[cy1:cy2, cx1:cx2]
+        #         cls_results = self._chair_classifier(chair_crop, imgsz=224, verbose=False)
+        #         if cls_results and cls_results[0].probs is not None:
+        #             probs = cls_results[0].probs
+        #             predicted_class = cls_results[0].names[probs.top1]
+        #             confidence = probs.top1conf.item()
+        #             if predicted_class == 'occupied' and confidence > 0.90:
+        #                 occupied_chair_indices.add(i)
 
 
         # 4. Draw chairs with occupancy status
@@ -1776,31 +1830,53 @@ class CameraWorker:
             boxes = results[0].boxes.xyxy.cpu()
             confidences = results[0].boxes.conf.cpu()
             
+            filtered_boxes = []
             for box, conf in zip(boxes, confidences):
-                if conf < 0.25: # Lowered threshold to catch occluded people
+                if conf < 0.20: # Lowered threshold back to 0.20 to catch heavily occluded people
                     continue
                     
-                people_count += 1
                 x1, y1, x2, y2 = map(int, box)
                 
-                # Calculate chest position (approx 30% down from top of bounding box)
-                chest_x = int((x1 + x2) / 2)
-                chest_y = int(y1 + (y2 - y1) * 0.3)
-                
-                # Calculate head position (approx 5% down from top)
-                head_x = chest_x
-                head_y = int(y1 + (y2 - y1) * 0.05)
-                
-                # Draw chest point
-                cv2.circle(frame, (chest_x, chest_y), 8, (0, 255, 0), -1)
-                cv2.circle(frame, (chest_x, chest_y), 4, (255, 255, 255), -1)
-                
-                # Draw small white point on head
-                cv2.circle(frame, (head_x, head_y), 3, (255, 255, 255), -1)
+                # Filter out duplicate overlapping boxes
+                is_duplicate = False
+                for fx1, fy1, fx2, fy2 in filtered_boxes:
+                    ix1 = max(x1, fx1)
+                    iy1 = max(y1, fy1)
+                    ix2 = min(x2, fx2)
+                    iy2 = min(y2, fy2)
+                    interArea = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                    
+                    if interArea > 0:
+                        box1Area = (x2 - x1) * (y2 - y1)
+                        box2Area = (fx2 - fx1) * (fy2 - fy1)
+                        unionArea = float(box1Area + box2Area - interArea)
+                        iou = interArea / unionArea
+                        ioma = interArea / float(min(box1Area, box2Area)) # Intersection over Minimum Area
+                        
+                        # If highly overlapping, consider it a duplicate
+                        if iou > 0.35 or ioma > 0.50:
+                            is_duplicate = True
+                            break
+                            
+                if is_duplicate:
+                    continue
+                    
+                filtered_boxes.append((x1, y1, x2, y2))
+                people_count += 1
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2) # Magenta/Pink in BGR
 
         # Display total count
         cv2.rectangle(frame, (10, 10), (450, 80), (0, 0, 0), -1)
         cv2.putText(frame, f"Active Persons in Room: {people_count}", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+        
+        if not hasattr(self, '_last_room_log'):
+            self._last_room_log = 0
+            
+        if time.time() - self._last_room_log > 5.0:
+            self._last_room_log = time.time()
+            photo_path = f"static/events/{int(time.time())}_room_{people_count}.jpg"
+            cv2.imwrite(os.path.join(config.BASE_DIR, photo_path), frame)
+            database.log_room(people_count, photo_path)
         
         return frame
 # Single shared instance used by the Flask app

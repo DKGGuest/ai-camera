@@ -672,6 +672,22 @@ async function pollModelData() {
                     <td>${timeStr}</td>
                 </tr>`;
             }).join("");
+        } else if (currentMode === "room") {
+            title = "Room Occupancy Log Table";
+            headers = "<th>Serial No.</th><th>Total Persons</th><th>Photo</th><th>Date</th><th>Time</th>";
+            rows = data.map(r => {
+                const dt = new Date(r.ts * 1000);
+                const dateStr = dt.toISOString().split('T')[0];
+                const timeStr = dt.toTimeString().split(' ')[0];
+                const imgHtml = r.photo_path ? `<img src="/${r.photo_path}" style="width: 80px; height: 45px; object-fit: cover; border-radius: 4px; border: 1px solid #444;">` : 'N/A';
+                return `<tr>
+                    <td>${r.id}</td>
+                    <td><strong style="color: #3498db;">${r.person_count}</strong></td>
+                    <td>${imgHtml}</td>
+                    <td>${dateStr}</td>
+                    <td>${timeStr}</td>
+                </tr>`;
+            }).join("");
         } else {
             headers = "<th>Serial No.</th><th>Time</th><th>Info</th>";
             rows = "<tr><td colspan='3'>No structured data available for this mode.</td></tr>";

@@ -119,6 +119,19 @@ def init_db():
                 )
                 """
             )
+            
+            # Room Logs Table
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS room_logs (
+                    id SERIAL PRIMARY KEY,
+                    ts DOUBLE PRECISION NOT NULL,
+                    date TEXT NOT NULL,
+                    person_count INTEGER NOT NULL,
+                    photo_path TEXT
+                )
+                """
+            )
         
         conn.commit()
         conn.close()
@@ -127,7 +140,7 @@ def init_db():
 def cleanup_old_records():
     """Delete records older than 7 days (7 * 24 * 3600 seconds)"""
     cutoff = time.time() - (7 * 24 * 3600)
-    tables = ["access_logs", "adaptive_logs", "people_logs", "queue_logs", "worker_logs", "box_logs", "bag_box_logs"]
+    tables = ["access_logs", "adaptive_logs", "people_logs", "queue_logs", "worker_logs", "box_logs", "bag_box_logs", "room_logs"]
     
     with _lock:
         conn = _connect()
@@ -221,6 +234,17 @@ def log_bag_box(boxes_in, boxes_out, bags_in, bags_out, photo_path):
         conn.commit()
         conn.close()
 
+def log_room(person_count, photo_path):
+    with _lock:
+        conn = _connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO room_logs (ts, date, person_count, photo_path) VALUES (%s, %s, %s, %s)",
+                (time.time(), _get_date_str(), person_count, photo_path)
+            )
+        conn.commit()
+        conn.close()
+
 def log_event(mode, event_type, detail, status):
     pass
 
@@ -249,6 +273,8 @@ def get_model_data(mode, limit=50):
                     cur.execute("SELECT id, ts, date, worker_name, work_time_s, rest_time_s, photo_path FROM worker_logs ORDER BY id DESC LIMIT %s", (limit,))
                 elif mode == "box":
                     cur.execute("SELECT id, ts, date, loaded_count, unloaded_count, photo_path FROM box_logs ORDER BY id DESC LIMIT %s", (limit,))
+                elif mode == "room":
+                    cur.execute("SELECT id, ts, date, person_count, photo_path FROM room_logs ORDER BY id DESC LIMIT %s", (limit,))
                 else:
                     return []
                 rows = cur.fetchall()
