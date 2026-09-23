@@ -180,9 +180,11 @@ fuse_score: True
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
         # Draw counters
-        cv2.rectangle(frame, (0, 0), (300, 80), (0, 0, 0), -1)
-        cv2.putText(frame, f"ENTRIES: {entry_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
-        cv2.putText(frame, f"EXITS: {exit_count}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+        active_count = entry_count - exit_count
+        cv2.rectangle(frame, (0, 0), (380, 130), (0, 0, 0), -1)
+        cv2.putText(frame, f"IN: {entry_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
+        cv2.putText(frame, f"OUT: {exit_count}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+        cv2.putText(frame, f"ACTIVE MEMBERS: {active_count}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 3)
 
         if out is not None:
             out.write(frame)
@@ -192,8 +194,8 @@ fuse_score: True
                 break
         else:
             display_frame = frame
-            if width > 800:
-                display_frame = cv2.resize(frame, (800, int(800 * height / width)))
+            if width > 1000:
+                display_frame = cv2.resize(frame, (1000, int(1000 * height / width)))
             cv2.imshow(f'{target_class.capitalize()} Counter', display_frame)
             
             loop_time = time.time() - loop_start

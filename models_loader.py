@@ -34,7 +34,7 @@ def load_custom_box_model():
 
 def load_desk_model():
     print("Loading YOLOv8m model for desk occupancy...")
-    # Using YOLOv8m for high accuracy in large spaces
+    # Using YOLOv8m for high accuracy in large spaces and small objects
     return YOLO("yolov8m.pt")
 
 

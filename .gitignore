@@ -34,6 +34,16 @@ datasets/
 imagesbox/
 runs/
 worker_cls_train/
+chair_dataset/
+known_workers/
+truck_counter_app/
+models codes/
+
+chair_detection_dataset/
+chair_occupancy_dataset/
+person _sitting_or_standing_dataset/
+*.zip
+*.tar.gz
 
 # Media and Outputs
 *.mp4

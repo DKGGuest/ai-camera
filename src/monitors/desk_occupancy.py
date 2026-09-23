@@ -49,8 +49,32 @@ class TrackedChair:
         self.cy = (box[1] + box[3]) / 2.0
         self.missed_frames = 0
         self.matched = True
+        self.match_count = 0
+        self.status = "Empty"
+        self.status_history = ["Empty"]
+        
+    def update_status(self, raw_status):
+        self.status_history.append(raw_status)
+        if len(self.status_history) > 15:
+            self.status_history.pop(0)
+            
+        occupied_count = self.status_history.count("Occupied")
+        # Require a threshold of frames to prevent flickering. 
+        # Bias slightly towards 'Occupied' so it doesn't drop instantly.
+        if occupied_count > len(self.status_history) * 0.3: 
+            self.status = "Occupied"
+        else:
+            self.status = "Empty"
         
     def update(self, box):
+        self.missed_frames = 0
+        self.match_count += 1
+        
+        # Lock the chair position after ~3 seconds of stable detection.
+        # This remembers the chair position and prevents overlapping/resizing when occupied.
+        if self.match_count > 45:
+            return
+
         # Update center with smoothing
         new_cx = (box[0] + box[2]) / 2.0
         new_cy = (box[1] + box[3]) / 2.0
@@ -70,7 +94,6 @@ class TrackedChair:
             int(self.cx + self.w/2),
             int(self.cy + self.h/2)
         )
-        self.missed_frames = 0
 
 class TrackedPerson:
     def __init__(self, box, status):
@@ -453,7 +476,10 @@ def main():
         # 4. Draw chairs based on occupancy
         for i, chair_box in enumerate(chairs):
             cx1, cy1, cx2, cy2 = chair_box
-            is_occupied = (i in occupied_chair_indices)
+            raw_is_occupied = (i in occupied_chair_indices)
+            raw_status = "Occupied" if raw_is_occupied else "Empty"
+            tracked_chairs[i].update_status(raw_status)
+            is_occupied = (tracked_chairs[i].status == "Occupied")
             
             if is_occupied:
                 color = (0, 0, 255)  # Red for Occupied

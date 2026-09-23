@@ -1,5 +1,5 @@
 import cv2
-
+import time
 from src.core.video import initialize_video_capture
 from src.core.models import load_face_models, load_known_faces, recognizer_match
 from src.utils.drawing import draw_banner
@@ -22,6 +22,7 @@ def run(video_source='0', known_dir='known_workers'):
     print("System Ready. Waiting for a face...")
 
     while True:
+        loop_start = time.time()
         if is_image:
             if frame is None:
                 break
@@ -98,7 +99,9 @@ def run(video_source='0', known_dir='known_workers'):
                 cv2.waitKey(0)
                 break
             else:
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                loop_time = time.time() - loop_start
+                wait_ms = max(1, int(1000 / fps) - int(loop_time * 1000)) if fps and fps > 0 else 1
+                if cv2.waitKey(wait_ms) & 0xFF == ord('q'):
                     break
         except cv2.error:
             pass
